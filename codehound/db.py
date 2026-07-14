@@ -1,0 +1,134 @@
+"""SQLite storage for scanned projects."""
+from __future__ import annotations
+
+import sqlite3
+from datetime import datetime, timezone
+
+from .config import DATA_DIR, DB_PATH
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS projects (
+    path            TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL,          -- git | bare | ungitted
+    name            TEXT NOT NULL,
+    root            TEXT NOT NULL,
+    language        TEXT,
+    branch          TEXT,
+    remote_url      TEXT,
+    last_commit_date TEXT,
+    last_commit_msg TEXT,
+    dirty           INTEGER DEFAULT 0,
+    created         TEXT,
+    modified        TEXT,
+    size_approx     INTEGER,
+    description     TEXT,
+    desc_mtime      TEXT,                   -- modified value when description was generated
+    adopted_to      TEXT,
+    first_seen      TEXT NOT NULL,
+    last_seen       TEXT NOT NULL,
+    missing         INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS scans (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    started         TEXT NOT NULL,
+    finished        TEXT,
+    roots           TEXT,
+    projects_found  INTEGER,
+    errors          TEXT
+);
+"""
+
+UPSERT_COLS = [
+    "path", "kind", "name", "root", "language", "branch", "remote_url",
+    "last_commit_date", "last_commit_msg", "dirty", "created", "modified",
+    "size_approx",
+]
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def connect() -> sqlite3.Connection:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(SCHEMA)
+    return conn
+
+
+def upsert_project(conn: sqlite3.Connection, proj: dict) -> None:
+    ts = now()
+    cols = ", ".join(UPSERT_COLS)
+    ph = ", ".join(f":{c}" for c in UPSERT_COLS)
+    sets = ", ".join(f"{c}=excluded.{c}" for c in UPSERT_COLS if c != "path")
+    conn.execute(
+        f"""INSERT INTO projects ({cols}, first_seen, last_seen, missing)
+            VALUES ({ph}, :ts, :ts, 0)
+            ON CONFLICT(path) DO UPDATE SET {sets}, last_seen=excluded.last_seen, missing=0""",
+        {**{c: proj.get(c) for c in UPSERT_COLS}, "ts": ts},
+    )
+
+
+def mark_missing(conn: sqlite3.Connection, scanned_roots: list[str], seen_paths: set[str]) -> int:
+    """Flag projects under the scanned roots that were not seen this scan."""
+    n = 0
+    for row in conn.execute("SELECT path, root FROM projects WHERE missing = 0"):
+        if row["root"] in scanned_roots and row["path"] not in seen_paths:
+            conn.execute("UPDATE projects SET missing = 1 WHERE path = ?", (row["path"],))
+            n += 1
+    return n
+
+
+def start_scan(conn: sqlite3.Connection, roots: list[str]) -> int:
+    cur = conn.execute(
+        "INSERT INTO scans (started, roots) VALUES (?, ?)", (now(), ", ".join(roots))
+    )
+    return cur.lastrowid
+
+
+def finish_scan(conn: sqlite3.Connection, scan_id: int, found: int, errors: list[str]) -> None:
+    conn.execute(
+        "UPDATE scans SET finished = ?, projects_found = ?, errors = ? WHERE id = ?",
+        (now(), found, "\n".join(errors) if errors else None, scan_id),
+    )
+
+
+def all_projects(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM projects ORDER BY modified DESC").fetchall()
+
+
+def duplicate_remotes(conn: sqlite3.Connection) -> set[str]:
+    """Remote URLs that appear at more than one live path."""
+    rows = conn.execute(
+        """SELECT remote_url FROM projects
+           WHERE remote_url IS NOT NULL AND remote_url != '' AND missing = 0
+           GROUP BY remote_url HAVING COUNT(*) > 1"""
+    ).fetchall()
+    return {r["remote_url"] for r in rows}
+
+
+def stale_descriptions(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Projects needing (re-)description: never described or modified since."""
+    return conn.execute(
+        """SELECT path, name, kind, language, modified FROM projects
+           WHERE missing = 0
+             AND (description IS NULL OR desc_mtime IS NULL OR desc_mtime != modified)"""
+    ).fetchall()
+
+
+def set_description(conn: sqlite3.Connection, path: str, description: str, mtime: str) -> None:
+    conn.execute(
+        "UPDATE projects SET description = ?, desc_mtime = ? WHERE path = ?",
+        (description, mtime, path),
+    )
+
+
+def set_adopted(conn: sqlite3.Connection, path: str, dest: str) -> None:
+    conn.execute("UPDATE projects SET adopted_to = ? WHERE path = ?", (dest, path))
+
+
+def last_scan(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM scans WHERE finished IS NOT NULL ORDER BY id DESC LIMIT 1"
+    ).fetchone()
