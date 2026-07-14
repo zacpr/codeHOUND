@@ -57,13 +57,17 @@ def pull_model(cfg: Config, progress=None) -> bool:
             last = ""
             for line in resp:
                 try:
-                    status = json.loads(line).get("status", "")
+                    msg = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if msg.get("error"):
+                    say(f"pull failed: {msg['error'].strip()}")
+                    return False
+                status = msg.get("status", "")
                 if status != last:
                     say(f"  {status}")
                     last = status
-            return True
+            return model_available(cfg)
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         say(f"pull failed: {e}")
         return False
