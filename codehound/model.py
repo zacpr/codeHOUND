@@ -23,6 +23,7 @@ COLUMNS = [
     ("Root", "root"),
     ("Description", "description"),
     ("Path", "path"),
+    ("Status", "dirty"),
 ]
 PATH_ROLE = Qt.ItemDataRole.UserRole + 1
 DATE_FIELDS = {"modified", "created"}
@@ -77,6 +78,8 @@ class ProjectsModel(QAbstractTableModel):
             val = proj.get(field)
             if field in DATE_FIELDS:
                 return _fmt_date(val)
+            if field == "dirty":
+                return "▲ dirty" if val else ""
             if field == "name":
                 marks = []
                 if proj.get("dirty"):
@@ -108,6 +111,8 @@ class ProjectsModel(QAbstractTableModel):
         if role == PATH_ROLE:
             return proj["path"]
         if role == Qt.ItemDataRole.UserRole:  # raw value for sorting
+            if field == "dirty":
+                return 1 if proj.get("dirty") else 0
             return proj.get(field) or ""
         return None
 

@@ -16,6 +16,7 @@ Description=codeHOUND project scan
 
 [Service]
 Type=oneshot
+ExecStart=-{exe} sync
 ExecStart={exe} scan
 Nice=19
 IOSchedulingClass=idle
