@@ -1,6 +1,6 @@
 Name:           codehound
 Version:        0.2.0
-Release:        1%{?dist}
+Release:        5%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
 License:        MIT
@@ -76,6 +76,30 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Sun Sep 06 2026 zacpr <zac@ashurtech.net> - 0.2.0-5
+- Fix custom OpenAI-compatible endpoints (LM Studio etc.): a base URL given
+  as bare host[:port] now targets the API root at /v1, so requests go to
+  /v1/chat/completions instead of the rejected /chat/completions.
+
+* Sun Sep 06 2026 zacpr <zac@ashurtech.net> - 0.2.0-4
+- Fix system tray icon not appearing: the StatusNotifier protocol sends the
+  icon by theme name, but the app built its QIcon from a bare SVG path —
+  the panel received an empty IconName and drew nothing. Now uses
+  QIcon.fromTheme("codehound", file-fallback).
+
+* Sun Sep 06 2026 zacpr <zac@ashurtech.net> - 0.2.0-3
+- Fix settings/janitor dialogs leaking ~0.7 MB each time they were opened
+  (Qt object cycles kept the whole dialog alive; now WA_DeleteOnClose)
+- Ask AI: when no provider is configured, clicking advises the user and
+  offers to open Settings → AI; tray/context entries are disabled with a
+  hint until then
+
+* Sun Sep 06 2026 zacpr <zac@ashurtech.net> - 0.2.0-2
+- Desktop entry: StartupNotify + StartupWMClass so menu launches give
+  feedback and the window groups with its hound icon
+- install-autostart: refresh desktop/icon caches so the menu icon
+  appears straight away; keep autostart entry quiet at login
+
 * Sun Sep 06 2026 zacpr <zac@ashurtech.net> - 0.2.0-1
 - Settings screen, account mirroring, Ask AI, janitor, UX polish
 - Initial RPM packaging

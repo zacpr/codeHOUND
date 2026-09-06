@@ -9,7 +9,10 @@ PROVIDERS: dict[str, AIProvider] = {
     p.key: p for p in (presets.OLLAMA, presets.OPENAI, presets.GEMINI, presets.KIMI, presets.CUSTOM)
 }
 
-__all__ = ["PROVIDERS", "AIError", "AIProvider", "ChatBackend", "AiSettings", "get_backend"]
+__all__ = [
+    "PROVIDERS", "AIError", "AIProvider", "ChatBackend", "AiSettings",
+    "get_backend", "is_configured",
+]
 
 
 def get_backend(cfg: AiSettings) -> ChatBackend:
@@ -18,3 +21,9 @@ def get_backend(cfg: AiSettings) -> ChatBackend:
     if provider is None:
         raise AIError(f"unknown AI provider: {cfg.ai_provider!r} (check config.toml [ai])")
     return provider.backend(cfg)
+
+
+def is_configured(cfg: AiSettings) -> bool:
+    """Has the user configured an AI provider well enough to call it?"""
+    provider = PROVIDERS.get(cfg.ai_provider)
+    return provider.is_configured(cfg) if provider else False
