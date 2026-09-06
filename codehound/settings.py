@@ -28,7 +28,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .ai import AIError
 from .ai import PROVIDERS as AI_PROVIDERS
+from .ai import validate_base_url
 from .config import Config, save_config
 from .providers import PROVIDERS
 from .providers.azure import AzureAccount
@@ -542,6 +544,15 @@ class SettingsDialog(QDialog):
         if not launchers:
             QMessageBox.warning(self, "Settings", "Add at least one launcher.")
             return
+        ollama_url = self.ollama_url.text().strip() or "http://localhost:11434"
+        ai_base_url = self.ai_base_url.text().strip()
+        try:
+            validate_base_url(ollama_url, hint="check the Ollama tab")
+            if ai_base_url:
+                validate_base_url(ai_base_url, hint="check the AI tab")
+        except AIError as e:
+            QMessageBox.warning(self, "Settings", str(e))
+            return
         cfg = Config(
             roots=roots,
             exclude_dirs=self.exclude_dirs.values(),
@@ -549,7 +560,7 @@ class SettingsDialog(QDialog):
             max_depth=self.max_depth.value(),
             one_filesystem=self.one_filesystem.isChecked(),
             ollama_enabled=self.ollama_enabled.isChecked(),
-            ollama_url=self.ollama_url.text().strip() or "http://localhost:11434",
+            ollama_url=ollama_url,
             ollama_model=self.ollama_model.text().strip(),
             ollama_enrich=self.ollama_enrich.isChecked(),
             ollama_classify=self.ollama_classify.isChecked(),
@@ -561,7 +572,7 @@ class SettingsDialog(QDialog):
             ai_provider=self.ai_provider.currentData(),
             ai_model=self.ai_model.text().strip(),
             ai_api_key=self.ai_api_key.text().strip(),
-            ai_base_url=self.ai_base_url.text().strip(),
+            ai_base_url=ai_base_url,
             ai_catalogue_summary=self.ai_catalogue_summary.isChecked(),
             janitor_enabled=self.janitor_enabled.isChecked(),
             janitor_exclude=self.janitor_exclude.values(),

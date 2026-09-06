@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from . import presets
-from .base import AIError, AIProvider, ChatBackend
+from .base import AIError, AIProvider, ChatBackend, validate_base_url
 from .config_like import AiSettings
 
 PROVIDERS: dict[str, AIProvider] = {
@@ -11,7 +11,7 @@ PROVIDERS: dict[str, AIProvider] = {
 
 __all__ = [
     "PROVIDERS", "AIError", "AIProvider", "ChatBackend", "AiSettings",
-    "get_backend", "is_configured",
+    "get_backend", "is_configured", "validate_base_url",
 ]
 
 
