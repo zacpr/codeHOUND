@@ -47,8 +47,12 @@ Exec={exe} app
 Icon=codehound
 Terminal=false
 Categories=Development;Utility;
-X-KDE-StartupNotify=false
+StartupNotify=true
+StartupWMClass=codehound
 """
+
+# autostart copy: same entry, but no launch feedback at login
+AUTOSTART = DESKTOP + "X-KDE-StartupNotify=false\n"
 
 
 def _exe() -> str:
@@ -80,14 +84,26 @@ def install_timer(every: str = "6h") -> int:
 
 
 def install_autostart() -> int:
-    content = DESKTOP.format(exe=_exe())
-    for d in (APPS_DIR, AUTOSTART_DIR):
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "codehound.desktop").write_text(content)
+    APPS_DIR.mkdir(parents=True, exist_ok=True)
+    (APPS_DIR / "codehound.desktop").write_text(DESKTOP.format(exe=_exe()))
+    AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
+    (AUTOSTART_DIR / "codehound.desktop").write_text(AUTOSTART.format(exe=_exe()))
     # install icon for the desktop file
     icons_dir = Path.home() / ".local/share/icons/hicolor/scalable/apps"
     icons_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy(ICON_PATH, icons_dir / "codehound.svg")
+    _refresh_desktop_caches()
     print(f"desktop entries installed: {APPS_DIR} and {AUTOSTART_DIR}")
     print(f"icon installed: {icons_dir / 'codehound.svg'}")
     return 0
+
+
+def _refresh_desktop_caches() -> None:
+    """Best-effort refresh so the menu entry and icon show up immediately."""
+    for cmd in (
+        ["update-desktop-database", str(APPS_DIR)],
+        ["gtk-update-icon-cache", "-q", str(Path.home() / ".local/share/icons/hicolor")],
+        ["kbuildsycoca6", "--noincremental"],
+    ):
+        if shutil.which(cmd[0]):
+            subprocess.run(cmd, capture_output=True)

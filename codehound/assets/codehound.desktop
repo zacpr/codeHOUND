@@ -7,4 +7,5 @@ Icon=codehound
 Terminal=false
 Categories=Development;Utility;
 Keywords=git;projects;scanner;
-X-KDE-StartupNotify=false
+StartupNotify=true
+StartupWMClass=codehound
