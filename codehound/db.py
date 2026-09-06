@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS scans (
     projects_found  INTEGER,
     errors          TEXT
 );
+CREATE TABLE IF NOT EXISTS kv (
+    key             TEXT PRIMARY KEY,
+    value           TEXT
+);
 """
 
 UPSERT_COLS = [
@@ -134,3 +138,12 @@ def last_scan(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT * FROM scans WHERE finished IS NOT NULL ORDER BY id DESC LIMIT 1"
     ).fetchone()
+
+
+def kv_get(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def kv_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", (key, value))

@@ -1,6 +1,7 @@
 """codeHOUND tray app and dashboard window."""
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -8,6 +9,8 @@ from PySide6.QtCore import QProcess, Qt, QTimer
 from PySide6.QtGui import QAction, QGuiApplication, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -16,6 +19,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSystemTrayIcon,
     QTableView,
@@ -27,12 +31,53 @@ from . import adopt as adopt_mod
 from . import db, launchers
 from .config import CONFIG_PATH, load_config
 from .model import PATH_ROLE, ProjectsModel, ProjectsProxy
+from .settings import SettingsDialog
 
 ICON_PATH = Path(__file__).parent / "assets" / "hound.svg"
 
 
-def _scan_command() -> list[str]:
-    return [sys.executable, "-m", "codehound.cli", "scan"]
+class AskDialog(QDialog):
+    """Runs `codehound ask …` in the background and streams the reply."""
+
+    def __init__(self, parent, cli_args: list[str], title: str, note: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(680, 480)
+        layout = QVBoxLayout(self)
+        if note:
+            label = QLabel(note)
+            label.setStyleSheet("color: palette(mid); font-style: italic;")
+            layout.addWidget(label)
+        self.output = QPlainTextEdit()
+        self.output.setReadOnly(True)
+        self.output.setPlainText("asking the model…\n")
+        layout.addWidget(self.output)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        copy_btn = buttons.addButton("Copy", QDialogButtonBox.ButtonRole.ActionRole)
+        copy_btn.clicked.connect(
+            lambda: QGuiApplication.clipboard().setText(self.output.toPlainText())
+        )
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._proc = QProcess(self)
+        self._proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self._proc.readyReadStandardOutput.connect(self._append)
+        self._proc.finished.connect(self._finished)
+        self._proc.start(sys.executable, ["-m", "codehound.cli", *cli_args])
+
+    def _append(self):
+        text = self._proc.readAllStandardOutput().data().decode(errors="replace")
+        if self.output.toPlainText() == "asking the model…\n":
+            self.output.clear()
+        self.output.appendPlainText(text.rstrip("\n"))
+        self.output.verticalScrollBar().setValue(self.output.verticalScrollBar().maximum())
+
+    def _finished(self, code, _status):
+        if self.output.toPlainText() == "asking the model…\n":
+            self.output.clear()
+        if code != 0:
+            self.output.appendPlainText(f"\n(ask exited with code {code} — check Settings → AI)")
 
 
 class Dashboard(QMainWindow):
@@ -43,6 +88,8 @@ class Dashboard(QMainWindow):
         self.setWindowIcon(QIcon(str(ICON_PATH)))
         self.resize(1250, 650)
         self._scan_proc: QProcess | None = None
+        self._sync_proc: QProcess | None = None
+        self._digest_proc: QProcess | None = None
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -54,8 +101,14 @@ class Dashboard(QMainWindow):
         top.addWidget(self.search, 1)
         self.scan_btn = QPushButton("Scan Now")
         top.addWidget(self.scan_btn)
+        self.sync_btn = QPushButton("Sync Accounts")
+        top.addWidget(self.sync_btn)
+        self.ask_btn = QPushButton("Ask AI…")
+        top.addWidget(self.ask_btn)
         reload_btn = QPushButton("Reload")
         top.addWidget(reload_btn)
+        settings_btn = QPushButton("Settings")
+        top.addWidget(settings_btn)
         layout.addLayout(top)
 
         self.model = ProjectsModel(self)
@@ -73,7 +126,10 @@ class Dashboard(QMainWindow):
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hdr.setStretchLastSection(True)
+        hdr.setSectionsMovable(True)
+        hdr.sectionMoved.connect(self._save_column_order)
         layout.addWidget(self.table)
+        self._restore_column_order()
 
         self.setCentralWidget(central)
         self.count_label = QLabel()
@@ -82,7 +138,10 @@ class Dashboard(QMainWindow):
         self.search.textChanged.connect(self.proxy.set_needle)
         self.search.textChanged.connect(self._update_count)
         self.scan_btn.clicked.connect(self.start_scan)
+        self.sync_btn.clicked.connect(self.start_sync)
+        self.ask_btn.clicked.connect(self.ask_ai)
         reload_btn.clicked.connect(self.reload)
+        settings_btn.clicked.connect(self.open_settings)
         self.table.doubleClicked.connect(self._open_default)
         self.table.customContextMenuRequested.connect(self._context_menu)
 
@@ -92,8 +151,40 @@ class Dashboard(QMainWindow):
         self.addAction(find)
 
         self.reload()
-        for col, width in ((0, 220), (1, 70), (2, 90), (3, 130), (4, 130), (5, 130), (6, 170), (7, 320)):
+        for col, width in ((0, 220), (1, 70), (2, 90), (3, 130), (4, 130), (5, 130), (6, 170), (7, 320), (9, 80)):
             self.table.setColumnWidth(col, width)
+
+    # ----- columns -----
+    def _save_column_order(self, *_args):
+        hdr = self.table.horizontalHeader()
+        order = [hdr.logicalIndex(v) for v in range(hdr.count())]
+        conn = db.connect()
+        try:
+            db.kv_set(conn, "column_order", ",".join(map(str, order)))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _restore_column_order(self):
+        conn = db.connect()
+        try:
+            raw = db.kv_get(conn, "column_order")
+        finally:
+            conn.close()
+        if not raw:
+            return
+        try:
+            order = [int(x) for x in raw.split(",")]
+        except ValueError:
+            return
+        hdr = self.table.horizontalHeader()
+        if len(order) != hdr.count() or sorted(order) != list(range(hdr.count())):
+            return
+        # order[visual] = logical; move each logical section to its visual slot
+        for visual, logical in enumerate(order):
+            current_visual = hdr.visualIndex(logical)
+            if current_visual != visual:
+                hdr.moveSection(current_visual, visual)
 
     # ----- data -----
     def reload(self):
@@ -102,44 +193,78 @@ class Dashboard(QMainWindow):
         self._update_count()
         conn = db.connect()
         last = db.last_scan(conn)
+        digest_at = db.kv_get(conn, "ai_digest_at")
         conn.close()
+        self._digest_at = digest_at
+        self._refresh_ask_button()
         if last:
             self.statusBar().showMessage(f"last scan: {last['finished']} ({last['projects_found']} projects)")
         else:
             self.statusBar().showMessage(f"no scans yet — hit Scan Now  ·  config: {CONFIG_PATH}")
 
+    def _refresh_ask_button(self):
+        if self.cfg.ai_catalogue_summary:
+            from .ask import digest_stale
+            at = self._digest_at[5:16].replace("T", " ") if self._digest_at else "not generated yet"
+            state = " — stale, projects changed since" if digest_stale(self._digest_at) else ""
+            self.ask_btn.setToolTip(
+                f"Ask across the catalogue (model-written summary, last updated {at}{state})"
+            )
+        else:
+            self.ask_btn.setToolTip("Ask across the catalogue")
+
     def _update_count(self):
         self.count_label.setText(f"{self.proxy.rowCount()}/{self.model.rowCount()} projects")
 
-    # ----- scanning -----
-    def start_scan(self):
-        if self._scan_proc:
+    # ----- background CLI tasks (scan / sync) -----
+    def _start_cli(self, attr: str, args: list[str], btn: QPushButton, busy: str, idle: str):
+        if getattr(self, attr):
             return
-        self.scan_btn.setEnabled(False)
-        self.scan_btn.setText("Scanning…")
+        btn.setEnabled(False)
+        btn.setText(busy)
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         proc.readyReadStandardOutput.connect(
-            lambda: self._scan_output(proc.readAllStandardOutput().data().decode(errors="replace"))
+            lambda: self._task_output(proc.readAllStandardOutput().data().decode(errors="replace"))
         )
-        proc.finished.connect(self._scan_finished)
-        proc.start(_scan_command()[0], _scan_command()[1:])
-        self._scan_proc = proc
+        proc.finished.connect(lambda code, _s: self._task_finished(attr, code, btn, idle, args[0]))
+        proc.start(sys.executable, ["-m", "codehound.cli", *args])
+        setattr(self, attr, proc)
 
-    def _scan_output(self, text: str):
+    def start_scan(self):
+        self._start_cli("_scan_proc", ["scan"], self.scan_btn, "Scanning…", "Scan Now")
+
+    def start_sync(self):
+        self._start_cli("_sync_proc", ["sync"], self.sync_btn, "Syncing…", "Sync Accounts")
+
+    def refresh_digest(self):
+        if not self.cfg.ai_catalogue_summary:
+            self.statusBar().showMessage(
+                "enable catalogue summaries in Settings → AI first")
+            return
+        self._start_cli("_digest_proc", ["ask", "--refresh-digest"],
+                        self.ask_btn, "Summarising…", "Ask AI…")
+
+    def _task_output(self, text: str):
         line = text.strip().splitlines()
         if line:
             self.statusBar().showMessage(line[-1][:200])
 
-    def _scan_finished(self, code, _status):
-        self._scan_proc = None
-        self.scan_btn.setEnabled(True)
-        self.scan_btn.setText("Scan Now")
+    def _task_finished(self, attr: str, code: int, btn: QPushButton, idle: str, what: str):
+        setattr(self, attr, None)
+        btn.setEnabled(True)
+        btn.setText(idle)
         self.reload()
         if code != 0:
-            self.statusBar().showMessage(f"scan exited with code {code} — see journal/config")
+            self.statusBar().showMessage(f"{what} exited with code {code} — see journal/config")
 
     # ----- actions -----
+    def open_settings(self):
+        dlg = SettingsDialog(self.cfg, self)
+        if dlg.exec() == SettingsDialog.DialogCode.Accepted:
+            self.reload()
+            self.statusBar().showMessage(f"settings saved to {CONFIG_PATH}")
+
     def _selected_path(self, index=None) -> str | None:
         idx = index if index is not None and index.isValid() else self.table.currentIndex()
         if not idx.isValid():
@@ -162,11 +287,64 @@ class Dashboard(QMainWindow):
             act = menu.addAction(f"Open in {name}")
             act.triggered.connect(lambda _=False, n=name, p=path: launchers.launch(self.cfg, n, p))
         menu.addSeparator()
+        ask_menu = menu.addMenu("Ask AI")
+        ask_menu.addAction("Summarise this project").triggered.connect(
+            lambda: self._ask_about(path, "Summarise this project: what it is, the tech stack, and its current state.")
+        )
+        ask_menu.addAction("What's it up to?").triggered.connect(
+            lambda: self._ask_about(path, "Based on the recent commits and working tree, what is actively being worked on in this project?")
+        )
+        ask_menu.addAction("Custom question…").triggered.connect(lambda: self._ask_custom(path))
+        menu.addSeparator()
+        menu.addAction("Open in file manager").triggered.connect(
+            lambda: subprocess.Popen(["xdg-open", path])
+        )
         menu.addAction("Adopt into repos…").triggered.connect(lambda: self._adopt(path))
         menu.addAction("Copy path").triggered.connect(
             lambda: QGuiApplication.clipboard().setText(path)
         )
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    # ----- Ask AI -----
+    def _show_answer(self, cli_args: list[str], title: str, note: str = ""):
+        dlg = AskDialog(self, cli_args, title, note)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.show()
+
+    def _ask_about(self, path: str, question: str):
+        self._show_answer(["ask", "--path", path, question], f"Ask AI — {Path(path).name}")
+
+    def _ask_custom(self, path: str):
+        q, ok = QInputDialog.getMultiLineText(self, "Ask AI", f"Ask about {path}:")
+        if ok and q.strip():
+            self._ask_about(path, q.strip())
+
+    def ask_ai(self):
+        menu = QMenu(self)
+        menu.addAction("Ask a question…").triggered.connect(self._ask_catalogue_custom)
+        if self.cfg.ai_catalogue_summary:
+            from .ask import digest_stale
+            menu.addSeparator()
+            menu.addAction("Regenerate catalogue summary").triggered.connect(self.refresh_digest)
+            at = self._digest_at[5:16].replace("T", " ") if self._digest_at else "never"
+            state = " — STALE (projects changed since)" if digest_stale(self._digest_at) else ""
+            info = menu.addAction(f"Summary last updated: {at}{state}")
+            info.setEnabled(False)
+        menu.exec(self.ask_btn.mapToGlobal(self.ask_btn.rect().bottomLeft()))
+
+    def _ask_catalogue_custom(self):
+        q, ok = QInputDialog.getMultiLineText(
+            self, "Ask AI", "Ask across your whole project catalogue:"
+        )
+        if ok and q.strip():
+            note = ""
+            if self.cfg.ai_catalogue_summary:
+                from .ask import digest_stale
+                at = self._digest_at[5:16].replace("T", " ") if self._digest_at else "never"
+                note = f"Answering from the model-written catalogue summary (updated {at})."
+                if digest_stale(self._digest_at):
+                    note += " ⚠ It may be stale — projects changed since; use Ask AI ▸ Regenerate."
+            self._show_answer(["ask", q.strip()], "Ask AI — all projects", note)
 
     def _adopt(self, path: str):
         suggested = adopt_mod.suggest_name(self.cfg, path)
@@ -215,6 +393,11 @@ def run_app() -> int:
     menu = QMenu()
     menu.addAction("Open Dashboard").triggered.connect(lambda: (win.show(), win.raise_(), win.activateWindow()))
     menu.addAction("Scan Now").triggered.connect(win.start_scan)
+    menu.addAction("Sync Accounts").triggered.connect(win.start_sync)
+    menu.addAction("Ask AI…").triggered.connect(lambda: (win.show(), win.raise_(), win._ask_catalogue_custom()))
+    if win.cfg.ai_catalogue_summary:
+        menu.addAction("Refresh AI summary").triggered.connect(win.refresh_digest)
+    menu.addAction("Settings…").triggered.connect(win.open_settings)
     menu.addSeparator()
     menu.addAction("Quit").triggered.connect(app.quit)
     tray.setContextMenu(menu)

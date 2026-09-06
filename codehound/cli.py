@@ -43,7 +43,119 @@ def cmd_scan(args) -> int:
 
     if not args.no_enrich:
         ollama.enrich(cfg, progress=_say)
+
+    if cfg.ai_catalogue_summary:
+        from . import ask
+        from .ai import AIError
+
+        try:
+            _say("updating AI catalogue summary…")
+            ask.refresh_digest(cfg)
+        except AIError as e:
+            _say(f"catalogue summary skipped: {e}")
     return 1 if result.errors and not result.projects else 0
+
+
+def cmd_sync(args) -> int:
+    from . import sync
+
+    cfg = load_config()
+    if not any(cfg.accounts.values()):
+        _say("no accounts configured — add some in Settings → Accounts or in config.toml")
+        return 0
+    result = sync.sync_accounts(cfg, progress=_say)
+    _say(
+        f"sync done: {result.remote} remote · {len(result.cloned)} cloned · "
+        f"{len(result.updated)} updated · {result.unchanged} unchanged · "
+        f"{len(result.skipped_dirty)} dirty (skipped pull) · {len(result.failed)} failed"
+    )
+    for failure in result.failed:
+        _say(f"  FAILED {failure}")
+    if cfg.ai_catalogue_summary and (result.cloned or result.updated):
+        from . import ask
+        from .ai import AIError
+
+        try:
+            _say("updating AI catalogue summary…")
+            ask.refresh_digest(cfg)
+        except AIError as e:
+            _say(f"catalogue summary skipped: {e}")
+    return 1 if result.failed else 0
+
+
+def cmd_ask(args) -> int:
+    from . import ask
+    from .ai import AIError
+
+    cfg = load_config()
+    try:
+        if args.refresh_digest:
+            digest = ask.refresh_digest(cfg)
+            _say(f"digest refreshed ({len(digest)} chars)")
+            return 0
+        if cfg.ai_catalogue_summary:
+            from .ask import digest_status
+            generated, stale = digest_status()
+            state = "stale — projects changed since" if stale else "up to date"
+            _say(f"(catalogue summary: {state}, generated {generated or 'never'})")
+        if not args.question:
+            print("ask: a question is required (unless --refresh-digest)", file=sys.stderr)
+            return 1
+        if args.path:
+            answer = ask.ask_about_project(cfg, args.path, args.question)
+        else:
+            answer = ask.ask_about_catalogue(cfg, args.question)
+    except AIError as e:
+        print(f"ask: {e}", file=sys.stderr)
+        return 1
+    _say(answer)
+    return 0
+
+
+def cmd_open(args) -> int:
+    from . import db, launchers
+
+    cfg = load_config()
+    needle = args.name.lower()
+    conn = db.connect()
+    try:
+        rows = [r for r in db.all_projects(conn) if not r["missing"]]
+    finally:
+        conn.close()
+    matches = [r for r in rows if needle in r["name"].lower() or needle in r["path"].lower()]
+    if not matches:
+        print(f"open: no project matching {args.name!r}", file=sys.stderr)
+        return 1
+    # exact name match wins, then shortest path
+    exact = [r for r in matches if r["name"].lower() == needle]
+    target = (exact or sorted(matches, key=lambda r: len(r["path"])))[0]
+    names = launchers.launcher_names(cfg)
+    if not names:
+        print("open: no launchers configured", file=sys.stderr)
+        return 1
+    launchers.launch(cfg, names[0], target["path"])
+    _say(f"opened {target['path']} in {names[0]}")
+    return 0
+
+
+def cmd_janitor(args) -> int:
+    from . import janitor
+
+    cfg = load_config()
+    if not cfg.janitor_enabled:
+        _say("janitor is disabled in config ([janitor] enabled = false)")
+        return 0
+    result = janitor.run(cfg, dry_run=not args.force, progress=_say)
+    verb = "would remove" if not args.force else "removed"
+    _say(
+        f"janitor: {len(result.candidates)} candidates, {len(result.removed)} {verb}, "
+        f"{len(result.skipped)} skipped, {len(result.errors)} errors"
+    )
+    if result.skipped:
+        _say("skipped:")
+        for path, why in result.skipped:
+            _say(f"  {path}  ({why})")
+    return 1 if result.errors else 0
 
 
 def cmd_app(args) -> int:
@@ -84,6 +196,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--verbose", "-v", action="store_true", help="print each project found")
     p.add_argument("--no-enrich", action="store_true", help="skip Ollama description pass")
     p.set_defaults(func=cmd_scan)
+
+    p = sub.add_parser("sync", help="clone/fetch all repos from configured accounts")
+    p.set_defaults(func=cmd_sync)
+
+    p = sub.add_parser("ask", help="ask the configured AI about a project or the whole catalogue")
+    p.add_argument("question", nargs="?", help="question to ask")
+    p.add_argument("--path", help="ask about this project; without it, asks across the catalogue")
+    p.add_argument("--refresh-digest", action="store_true",
+                   help="regenerate the model-written catalogue summary and exit")
+    p.set_defaults(func=cmd_ask)
+
+    p = sub.add_parser("open", help="open a project by name (fuzzy) in the first launcher")
+    p.add_argument("name", help="project name or path fragment")
+    p.set_defaults(func=cmd_open)
+
+    p = sub.add_parser("janitor", help="remove local clones whose remote work is done")
+    p.add_argument("--force", action="store_true", help="actually remove (default is dry-run)")
+    p.set_defaults(func=cmd_janitor)
 
     p = sub.add_parser("app", help="run the tray app + dashboard")
     p.set_defaults(func=cmd_app)

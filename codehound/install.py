@@ -16,6 +16,7 @@ Description=codeHOUND project scan
 
 [Service]
 Type=oneshot
+ExecStart=-{exe} sync
 ExecStart={exe} scan
 Nice=19
 IOSchedulingClass=idle
@@ -34,13 +35,16 @@ Persistent=true
 WantedBy=timers.target
 """
 
+ICON_PATH = Path(__file__).parent / "assets" / "hound.svg"
+DESKTOP_PATH = Path(__file__).parent / "assets" / "codehound.desktop"
+
 DESKTOP = """\
 [Desktop Entry]
 Type=Application
 Name=codeHOUND
 Comment=Repo hunter and launcher dashboard
 Exec={exe} app
-Icon=folder-development
+Icon=codehound
 Terminal=false
 Categories=Development;Utility;
 X-KDE-StartupNotify=false
@@ -80,5 +84,10 @@ def install_autostart() -> int:
     for d in (APPS_DIR, AUTOSTART_DIR):
         d.mkdir(parents=True, exist_ok=True)
         (d / "codehound.desktop").write_text(content)
+    # install icon for the desktop file
+    icons_dir = Path.home() / ".local/share/icons/hicolor/scalable/apps"
+    icons_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(ICON_PATH, icons_dir / "codehound.svg")
     print(f"desktop entries installed: {APPS_DIR} and {AUTOSTART_DIR}")
+    print(f"icon installed: {icons_dir / 'codehound.svg'}")
     return 0
