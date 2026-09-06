@@ -47,6 +47,18 @@ class AIProvider:
     env_key: str = ""          # env var consulted when the configured key is blank
     needs_key: bool = False
 
+    def is_configured(self, cfg) -> bool:
+        """Enough settings present to actually make a call."""
+        if not (cfg.ai_base_url or self.default_base_url):
+            return False
+        if not (cfg.ai_model or self.default_model):
+            return False
+        if self.needs_key:
+            key = cfg.ai_api_key or (os.environ.get(self.env_key, "") if self.env_key else "")
+            if not key:
+                return False
+        return True
+
     def backend(self, cfg) -> ChatBackend:
         base_url = cfg.ai_base_url or self.default_base_url
         model = cfg.ai_model or self.default_model

@@ -203,6 +203,12 @@ class Dashboard(QMainWindow):
             self.statusBar().showMessage(f"no scans yet — hit Scan Now  ·  config: {CONFIG_PATH}")
 
     def _refresh_ask_button(self):
+        from .ai import is_configured
+        if not is_configured(self.cfg):
+            self.ask_btn.setToolTip(
+                "Ask across the catalogue — needs an AI provider (Settings → AI)"
+            )
+            return
         if self.cfg.ai_catalogue_summary:
             from .ask import digest_stale
             at = self._digest_at[5:16].replace("T", " ") if self._digest_at else "not generated yet"
@@ -261,6 +267,7 @@ class Dashboard(QMainWindow):
     # ----- actions -----
     def open_settings(self):
         dlg = SettingsDialog(self.cfg, self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
             self.reload()
             self.statusBar().showMessage(f"settings saved to {CONFIG_PATH}")
@@ -287,7 +294,11 @@ class Dashboard(QMainWindow):
             act = menu.addAction(f"Open in {name}")
             act.triggered.connect(lambda _=False, n=name, p=path: launchers.launch(self.cfg, n, p))
         menu.addSeparator()
+        from .ai import is_configured
         ask_menu = menu.addMenu("Ask AI")
+        ask_menu.setEnabled(is_configured(self.cfg))
+        if not is_configured(self.cfg):
+            ask_menu.setToolTip("Configure an AI provider in Settings → AI first")
         ask_menu.addAction("Summarise this project").triggered.connect(
             lambda: self._ask_about(path, "Summarise this project: what it is, the tech stack, and its current state.")
         )
@@ -320,6 +331,21 @@ class Dashboard(QMainWindow):
             self._ask_about(path, q.strip())
 
     def ask_ai(self):
+        from .ai import is_configured
+        if not is_configured(self.cfg):
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setWindowTitle("Ask AI — no provider configured")
+            box.setText(
+                "Ask AI needs a model provider before it can answer questions.\n\n"
+                "Open Settings → AI to pick a provider (Ollama runs locally;\n"
+                "OpenAI, Gemini and Kimi need an API key)."
+            )
+            box.addButton("Open Settings", QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(QMessageBox.StandardButton.Close)
+            if box.exec() == 0:  # Open Settings
+                self.open_settings()
+            return
         menu = QMenu(self)
         menu.addAction("Ask a question…").triggered.connect(self._ask_catalogue_custom)
         if self.cfg.ai_catalogue_summary:
@@ -391,11 +417,18 @@ def run_app() -> int:
     tray = QSystemTrayIcon(icon)
     tray.setToolTip("codeHOUND — repo hunter")
     menu = QMenu()
+    from .ai import is_configured
+    ai_ready = is_configured(win.cfg)
     menu.addAction("Open Dashboard").triggered.connect(lambda: (win.show(), win.raise_(), win.activateWindow()))
     menu.addAction("Scan Now").triggered.connect(win.start_scan)
     menu.addAction("Sync Accounts").triggered.connect(win.start_sync)
-    menu.addAction("Ask AI…").triggered.connect(lambda: (win.show(), win.raise_(), win._ask_catalogue_custom()))
-    if win.cfg.ai_catalogue_summary:
+    ask_act = menu.addAction("Ask AI…")
+    ask_act.setEnabled(ai_ready)
+    if ai_ready:
+        ask_act.triggered.connect(lambda: (win.show(), win.raise_(), win._ask_catalogue_custom()))
+    else:
+        ask_act.setToolTip("Configure an AI provider in Settings → AI first")
+    if ai_ready and win.cfg.ai_catalogue_summary:
         menu.addAction("Refresh AI summary").triggered.connect(win.refresh_digest)
     menu.addAction("Settings…").triggered.connect(win.open_settings)
     menu.addSeparator()

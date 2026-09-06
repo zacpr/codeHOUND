@@ -1,6 +1,6 @@
 Name:           codehound
 Version:        0.2.0
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
 License:        MIT
@@ -76,6 +76,13 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Sun Sep 06 2026 zacpr <zac@ashurtech.net> - 0.2.0-3
+- Fix settings/janitor dialogs leaking ~0.7 MB each time they were opened
+  (Qt object cycles kept the whole dialog alive; now WA_DeleteOnClose)
+- Ask AI: when no provider is configured, clicking advises the user and
+  offers to open Settings → AI; tray/context entries are disabled with a
+  hint until then
+
 * Sun Sep 06 2026 zacpr <zac@ashurtech.net> - 0.2.0-2
 - Desktop entry: StartupNotify + StartupWMClass so menu launches give
   feedback and the window groups with its hound icon

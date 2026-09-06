@@ -1,6 +1,8 @@
 """Settings dialog — edit codeHOUND configuration from the GUI."""
 from __future__ import annotations
 
+from functools import partial
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -410,7 +412,9 @@ class SettingsDialog(QDialog):
         clone_row = QHBoxLayout()
         self.clone_dest = QLineEdit()
         browse_clone = QPushButton("Browse…")
-        browse_clone.clicked.connect(lambda: self._browse_into(self.clone_dest, "Clone destination"))
+        # partial over a bound method is weakly referenced — a lambda capturing
+        # self here would cycle (dialog -> button -> lambda -> dialog) and leak
+        browse_clone.clicked.connect(partial(self._browse_into, self.clone_dest, "Clone destination"))
         clone_row.addWidget(self.clone_dest, 1)
         clone_row.addWidget(browse_clone)
         clone_holder = QWidget()
@@ -425,7 +429,7 @@ class SettingsDialog(QDialog):
         dest_row = QHBoxLayout()
         self.adopt_dest = QLineEdit()
         browse_dest = QPushButton("Browse…")
-        browse_dest.clicked.connect(lambda: self._browse_into(self.adopt_dest, "Adopt destination"))
+        browse_dest.clicked.connect(partial(self._browse_into, self.adopt_dest, "Adopt destination"))
         dest_row.addWidget(self.adopt_dest, 1)
         dest_row.addWidget(browse_dest)
         dest_holder = QWidget()
@@ -506,6 +510,7 @@ class SettingsDialog(QDialog):
         from PySide6.QtCore import QProcess
         import sys
         dlg = QDialog(self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.setWindowTitle("Janitor — dry run")
         dlg.resize(640, 420)
         layout = QVBoxLayout(dlg)
