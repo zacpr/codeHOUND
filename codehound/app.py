@@ -409,7 +409,12 @@ def run_app() -> int:
     app.setApplicationName("codeHOUND")
     app.setDesktopFileName("codehound")
     app.setQuitOnLastWindowClosed(False)
-    icon = QIcon(str(ICON_PATH))
+    # The tray icon must come from the icon theme: StatusNotifier sends the
+    # icon by *name* over D-Bus, and a QIcon built from a lone file path has
+    # no name — so the panel got an empty IconName and rendered nothing.
+    # QIcon.fromTheme(name, fallback) gives us a named icon with the SVG as
+    # the fallback pixmap for environments without the theme icon installed.
+    icon = QIcon.fromTheme("codehound", QIcon(str(ICON_PATH)))
     app.setWindowIcon(icon)
 
     win = Dashboard()

@@ -1,6 +1,6 @@
 Name:           codehound
 Version:        0.2.0
-Release:        3%{?dist}
+Release:        4%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
 License:        MIT
@@ -76,6 +76,12 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Sun Sep 06 2026 zacpr <zac@ashurtech.net> - 0.2.0-4
+- Fix system tray icon not appearing: the StatusNotifier protocol sends the
+  icon by theme name, but the app built its QIcon from a bare SVG path —
+  the panel received an empty IconName and drew nothing. Now uses
+  QIcon.fromTheme("codehound", file-fallback).
+
 * Sun Sep 06 2026 zacpr <zac@ashurtech.net> - 0.2.0-3
 - Fix settings/janitor dialogs leaking ~0.7 MB each time they were opened
   (Qt object cycles kept the whole dialog alive; now WA_DeleteOnClose)
