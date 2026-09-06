@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 from . import presets
-from .base import AIError, AIProvider, ChatBackend
+from .base import AIError, AIProvider, ChatBackend, validate_base_url
 from .config_like import AiSettings
 
 PROVIDERS: dict[str, AIProvider] = {
     p.key: p for p in (presets.OLLAMA, presets.OPENAI, presets.GEMINI, presets.KIMI, presets.CUSTOM)
 }
 
-__all__ = ["PROVIDERS", "AIError", "AIProvider", "ChatBackend", "AiSettings", "get_backend"]
+__all__ = [
+    "PROVIDERS", "AIError", "AIProvider", "ChatBackend", "AiSettings", "get_backend",
+    "validate_base_url",
+]
 
 
 def get_backend(cfg: AiSettings) -> ChatBackend:

@@ -6,10 +6,12 @@ ChatBackend in its own module and register it in ai/__init__.py.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -26,6 +28,19 @@ def strip_think(text: str) -> str:
 
 class AIError(Exception):
     """An AI provider/config failure with a user-readable message."""
+
+
+def validate_base_url(url: str, hint: str = "check Settings → AI") -> None:
+    """Check a base URL is usable (http/https, host, numeric port). Raises AIError."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise AIError(f"invalid base URL {url!r} ({hint}): scheme must be http or https")
+    if not parts.hostname:
+        raise AIError(f"invalid base URL {url!r} ({hint}): missing host")
+    try:
+        parts.port  # nonnumeric or out-of-range ports raise ValueError here
+    except ValueError as e:
+        raise AIError(f"invalid base URL {url!r} ({hint}): {e}") from e
 
 
 class ChatBackend(ABC):
@@ -67,6 +82,7 @@ class OpenAICompatible(ChatBackend):
     """Any endpoint speaking OpenAI's /chat/completions (Ollama, OpenAI, Kimi, Gemini, …)."""
 
     def __init__(self, base_url: str, model: str, api_key: str = ""):
+        validate_base_url(base_url)
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
@@ -89,9 +105,15 @@ class OpenAICompatible(ChatBackend):
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:300]
             raise AIError(f"HTTP {e.code} from {self.base_url}: {detail}")
+        except http.client.InvalidURL as e:
+            raise AIError(f"invalid base URL {self.base_url!r} (check Settings → AI): {e}")
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
             raise AIError(f"{self.base_url}: {e}")
         try:
             return strip_think(data["choices"][0]["message"]["content"])
         except (KeyError, IndexError, TypeError):
+            if isinstance(data, dict) and "error" in data:
+                err = data["error"]
+                msg = err.get("message", err) if isinstance(err, dict) else err
+                raise AIError(f"{self.base_url}: {msg} — check the base URL in Settings → AI")
             raise AIError(f"unexpected response shape: {str(data)[:300]}")
