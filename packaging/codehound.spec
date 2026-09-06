@@ -1,6 +1,6 @@
 Name:           codehound
 Version:        0.2.0
-Release:        4%{?dist}
+Release:        5%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
 License:        MIT
@@ -76,6 +76,11 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Sun Sep 06 2026 zacpr <zac@ashurtech.net> - 0.2.0-5
+- Fix custom OpenAI-compatible endpoints (LM Studio etc.): a base URL given
+  as bare host[:port] now targets the API root at /v1, so requests go to
+  /v1/chat/completions instead of the rejected /chat/completions.
+
 * Sun Sep 06 2026 zacpr <zac@ashurtech.net> - 0.2.0-4
 - Fix system tray icon not appearing: the StatusNotifier protocol sends the
   icon by theme name, but the app built its QIcon from a bare SVG path —

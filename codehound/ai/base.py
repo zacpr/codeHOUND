@@ -10,6 +10,7 @@ import json
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -79,7 +80,12 @@ class OpenAICompatible(ChatBackend):
     """Any endpoint speaking OpenAI's /chat/completions (Ollama, OpenAI, Kimi, Gemini, …)."""
 
     def __init__(self, base_url: str, model: str, api_key: str = ""):
-        self.base_url = base_url.rstrip("/")
+        base_url = base_url.rstrip("/")
+        # Bare host[:port] with no path (typical for local servers like
+        # LM Studio) means the OpenAI API root — which lives under /v1.
+        if not urllib.parse.urlsplit(base_url).path:
+            base_url += "/v1"
+        self.base_url = base_url
         self.model = model
         self.api_key = api_key
 
