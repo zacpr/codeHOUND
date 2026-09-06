@@ -1,6 +1,6 @@
 Name:           codehound
 Version:        0.2.0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
 License:        MIT
@@ -76,6 +76,12 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Sun Sep 06 2026 zacpr <zac@ashurtech.net> - 0.2.0-2
+- Desktop entry: StartupNotify + StartupWMClass so menu launches give
+  feedback and the window groups with its hound icon
+- install-autostart: refresh desktop/icon caches so the menu icon
+  appears straight away; keep autostart entry quiet at login
+
 * Sun Sep 06 2026 zacpr <zac@ashurtech.net> - 0.2.0-1
 - Settings screen, account mirroring, Ask AI, janitor, UX polish
 - Initial RPM packaging
