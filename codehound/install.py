@@ -35,7 +35,7 @@ Persistent=true
 WantedBy=timers.target
 """
 
-ICON_PATH = Path(__file__).parent / "assets" / "hound.svg"
+ICONS_PATH = Path(__file__).parent / "assets" / "icons"
 DESKTOP_PATH = Path(__file__).parent / "assets" / "codehound.desktop"
 
 DESKTOP = """\
@@ -44,7 +44,7 @@ Type=Application
 Name=codeHOUND
 Comment=Repo hunter and launcher dashboard
 Exec={exe} app
-Icon=codehound
+Icon=codehound-cody
 Terminal=false
 Categories=Development;Utility;
 StartupNotify=true
@@ -89,13 +89,24 @@ def install_autostart() -> int:
     AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
     (AUTOSTART_DIR / "codehound.desktop").write_text(AUTOSTART.format(exe=_exe()))
     # install icon for the desktop file
-    icons_dir = Path.home() / ".local/share/icons/hicolor/scalable/apps"
-    icons_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(ICON_PATH, icons_dir / "codehound.svg")
+    icons_dir = Path.home() / ".local/share/icons/hicolor"
+    install_icons(icons_dir)
     _refresh_desktop_caches()
     print(f"desktop entries installed: {APPS_DIR} and {AUTOSTART_DIR}")
-    print(f"icon installed: {icons_dir / 'codehound.svg'}")
+    print(f"Cody H. Ound icons installed: {icons_dir}")
     return 0
+
+
+def install_icons(icons_dir: Path) -> None:
+    """Install each raster size and retire the old orange scalable icon."""
+    sources = sorted(ICONS_PATH.glob("*/apps/codehound.png"))
+    if not sources:
+        raise FileNotFoundError(f"No codeHOUND icons found in {ICONS_PATH}")
+    for source in sources:
+        target = (icons_dir / source.relative_to(ICONS_PATH)).with_name("codehound-cody.png")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(source, target)
+    (icons_dir / "scalable/apps/codehound.svg").unlink(missing_ok=True)
 
 
 def _refresh_desktop_caches() -> None:

@@ -29,6 +29,20 @@ PATH_ROLE = Qt.ItemDataRole.UserRole + 1
 DATE_FIELDS = {"modified", "created"}
 DUP_COLOR = QColor(220, 150, 40)      # duplicate clone badge
 MISSING_COLOR = QColor(128, 128, 128)  # path gone
+PROJECT_VIEWS = {
+    "all": ("All projects", "Your projects. Back on the radar."),
+    "dirty": ("Working changes", "Pick up where you left off."),
+    "git": ("Git repositories", "Every repository, in one place."),
+    "ungitted": ("Loose projects", "Code that has not found a repository yet."),
+    "duplicates": ("Duplicate clones", "One remote. More than one local home."),
+    "missing": ("Missing paths", "Not found on the last scan. Kept for reference."),
+}
+
+
+def project_label(project: dict) -> str:
+    name = project.get("name") or ""
+    branch = project.get("branch")
+    return f"{name}/{branch}" if name and branch else name
 
 
 def _fmt_date(iso: str | None) -> str:
@@ -68,6 +82,42 @@ class ProjectsModel(QAbstractTableModel):
     def row(self, r: int) -> dict:
         return self._rows[r]
 
+    def matches_view(self, proj: dict, view: str) -> bool:
+        if view == "all":
+            return True
+        if view == "missing":
+            return bool(proj.get("missing"))
+        if proj.get("missing"):
+            return False
+        if view == "dirty":
+            return bool(proj.get("dirty"))
+        if view == "git":
+            return proj.get("kind") in ("git", "bare")
+        if view == "ungitted":
+            return proj.get("kind") == "ungitted"
+        if view == "duplicates":
+            return proj.get("remote_url") in self._dup_remotes
+        raise ValueError(f"Unknown project view: {view}")
+
+    def view_counts(self) -> dict[str, int]:
+        return {
+            view: sum(self.matches_view(row, view) for row in self._rows)
+            for view in PROJECT_VIEWS
+        }
+
+    def featured_projects(self, pinned_paths: set[str]) -> list[dict]:
+        live = sorted(
+            (row for row in self._rows if not row.get("missing")),
+            key=lambda row: (row.get("modified") or "", row["path"]),
+            reverse=True,
+        )
+        featured = live[:5]
+        recent_paths = {row["path"] for row in featured}
+        return featured + [
+            row for row in live
+            if row["path"] in pinned_paths and row["path"] not in recent_paths
+        ]
+
     def data(self, index: QModelIndex, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
@@ -88,10 +138,10 @@ class ProjectsModel(QAbstractTableModel):
                     marks.append("⌂")
                 if proj.get("remote_url") in self._dup_remotes:
                     marks.append("⧉")
-                return f"{val} {' '.join(marks)}".rstrip()
+                return f"{project_label(proj)} {' '.join(marks)}".rstrip()
             return val or ""
         if role == Qt.ItemDataRole.ToolTipRole:
-            tips = [proj["path"]]
+            tips = [project_label(proj), proj["path"]]
             if proj.get("last_commit_msg"):
                 tips.append(f"last commit: {proj['last_commit_msg']}")
             if proj.get("dirty"):
@@ -111,6 +161,8 @@ class ProjectsModel(QAbstractTableModel):
         if role == PATH_ROLE:
             return proj["path"]
         if role == Qt.ItemDataRole.UserRole:  # raw value for sorting
+            if field == "name":
+                return project_label(proj)
             if field == "dirty":
                 return 1 if proj.get("dirty") else 0
             return proj.get(field) or ""
@@ -123,17 +175,26 @@ class ProjectsProxy(QSortFilterProxyModel):
         self.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self.setSortRole(Qt.ItemDataRole.UserRole)
         self._needle = ""
+        self._view = "all"
+
+    def set_view(self, view: str) -> None:
+        if view not in PROJECT_VIEWS:
+            raise ValueError(f"Unknown project view: {view}")
+        self._view = view
+        self.invalidateFilter()
 
     def set_needle(self, text: str) -> None:
         self._needle = text.lower()
         self.invalidateFilter()
 
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
+        proj = self.sourceModel().row(source_row)
+        if not self.sourceModel().matches_view(proj, self._view):
+            return False
         if not self._needle:
             return True
-        proj = self.sourceModel().row(source_row)
-        hay = " ".join(
+        hay = (project_label(proj) + " " + " ".join(
             str(proj.get(f) or "")
             for f in ("name", "path", "description", "language", "branch", "kind")
-        ).lower()
+        )).lower()
         return all(word in hay for word in self._needle.split())

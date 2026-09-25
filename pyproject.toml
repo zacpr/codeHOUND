@@ -42,4 +42,4 @@ codehound = "codehound.cli:main"
 include = ["codehound*"]
 
 [tool.setuptools.package-data]
-codehound = ["assets/*.svg", "assets/*.desktop"]
+codehound = ["assets/*.png", "assets/*.desktop", "assets/icons/*/apps/*.png"]
