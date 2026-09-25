@@ -29,9 +29,16 @@ exclude_dirs = [
     "snap", ".cargo", ".rustup", ".npm", ".nvm", "Steam", ".steam",
     ".mozilla", ".thunderbird", ".var", "flatpak", ".gradle", ".m2",
     "site-packages", ".Trash-1000", "lost+found",
+    "checkpoints",   # AI-coding extension task snapshots (Roo Code, Kilo Code, …)
 ]
 # Absolute paths pruned exactly (add slow or irrelevant subtrees here)
-exclude_paths = []
+exclude_paths = [
+    # AI tool / editor app data — configuration and caches, not projects
+    "{home}/.config/Claude",
+    "{home}/.config/Code/User/History",
+    "{home}/.config/Code/User/globalStorage",
+    "{home}/.config/Code - Insiders/User/globalStorage",
+]
 max_depth = 8
 one_filesystem = true   # don't cross mount points inside a root
 
