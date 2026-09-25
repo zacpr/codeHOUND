@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="codehound/assets/mascot.png" width="180" alt="Cody H. Ound, the codeHOUND mascot">
+  <img src="docs/images/cody-hero.png" width="100%" alt="Cody H. Ound in sunglasses and headphones: &quot;It's a normal and real name.&quot;">
 </p>
 
 <h1 align="center">codeHOUND</h1>
