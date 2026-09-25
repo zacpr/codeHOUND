@@ -1,6 +1,6 @@
 Name:           codehound
 Version:        0.2.0
-Release:        5%{?dist}
+Release:        10%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
 License:        MIT
@@ -46,8 +46,11 @@ mkdir -p %{buildroot}%{_datadir}/applications
 install -m 644 codehound/assets/codehound.desktop %{buildroot}%{_datadir}/applications/
 
 # icon
-mkdir -p %{buildroot}%{_datadir}/icons/hicolor/scalable/apps
-install -m 644 codehound/assets/hound.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/codehound.svg
+for size in 16 22 24 32 48 64 128 256; do
+    mkdir -p %{buildroot}%{_datadir}/icons/hicolor/${size}x${size}/apps
+    install -m 644 codehound/assets/icons/${size}x${size}/apps/codehound.png \
+        %{buildroot}%{_datadir}/icons/hicolor/${size}x${size}/apps/codehound-cody.png
+done
 
 # remove pip's entry point (we have our own wrapper)
 rm -f %{buildroot}%{_bindir}/codehound  # pip may have written one; overwrite below
@@ -64,7 +67,7 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 %{python3_sitelib}/codehound/
 %{python3_sitelib}/codehound-*.dist-info/
 %{_datadir}/applications/codehound.desktop
-%{_datadir}/icons/hicolor/scalable/apps/codehound.svg
+%{_datadir}/icons/hicolor/*/apps/codehound-cody.png
 
 %post
 # refresh desktop database and icon cache
@@ -76,6 +79,14 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Sat Sep 26 2026 zacpr <zac@ashurtech.net> - 0.2.0-10
+- Give Cody a distinct theme icon name so desktop shells cannot reuse the old icon cache
+
+* Sat Sep 26 2026 zacpr <zac@ashurtech.net> - 0.2.0-9
+- Branded dashboard with featured projects, pins, AI catch-up and project/branch labels
+- Replace the orange icon with Cody H. Ound in the app, taskbar, menu and tray
+- Include desktop icons from 16 to 256 pixels
+
 * Sun Sep 06 2026 zacpr <zac@ashurtech.net> - 0.2.0-5
 - Fix custom OpenAI-compatible endpoints (LM Studio etc.): a base URL given
   as bare host[:port] now targets the API root at /v1, so requests go to

@@ -1,16 +1,21 @@
 """codeHOUND tray app and dashboard window."""
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
 
 from PySide6.QtCore import QProcess, Qt, QTimer
-from PySide6.QtGui import QAction, QGuiApplication, QIcon, QKeySequence
+from PySide6.QtGui import QAction, QGuiApplication, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDockWidget,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -21,6 +26,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSplitter,
+    QStackedWidget,
     QSystemTrayIcon,
     QTableView,
     QVBoxLayout,
@@ -30,10 +39,21 @@ from PySide6.QtWidgets import (
 from . import adopt as adopt_mod
 from . import db, launchers
 from .config import CONFIG_PATH, load_config
-from .model import PATH_ROLE, ProjectsModel, ProjectsProxy
+from .model import COLUMNS, PATH_ROLE, PROJECT_VIEWS, ProjectsModel, ProjectsProxy, project_label
 from .settings import SettingsDialog
+from .theme import apply_theme
 
-ICON_PATH = Path(__file__).parent / "assets" / "hound.svg"
+ICON_PATH = Path(__file__).parent / "assets" / "hound.png"
+MASCOT_PATH = Path(__file__).parent / "assets" / "mascot.png"
+
+
+def _label(text: str = "", *, muted: bool = False, eyebrow: bool = False) -> QLabel:
+    label = QLabel(text)
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    label.setWordWrap(True)
+    label.setProperty("muted", muted)
+    label.setProperty("eyebrow", eyebrow)
+    return label
 
 
 class AskDialog(QDialog):
@@ -86,73 +106,554 @@ class Dashboard(QMainWindow):
         self.cfg = load_config()
         self.setWindowTitle("codeHOUND")
         self.setWindowIcon(QIcon(str(ICON_PATH)))
-        self.resize(1250, 650)
+        self.resize(1440, 860)
+        self.setMinimumSize(1060, 740)
         self._scan_proc: QProcess | None = None
         self._sync_proc: QProcess | None = None
         self._digest_proc: QProcess | None = None
+        self._view = "all"
+        self._pinned_paths = self._load_pins()
+        self._featured: list[dict] = []
+        self._featured_index = 0
 
         central = QWidget()
-        layout = QVBoxLayout(central)
+        shell = QHBoxLayout(central)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        shell.addWidget(self._build_sidebar())
 
-        top = QHBoxLayout()
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Filter by name, path, description, language, branch…  (Ctrl+F)")
-        self.search.setClearButtonEnabled(True)
-        top.addWidget(self.search, 1)
-        self.scan_btn = QPushButton("Scan Now")
-        top.addWidget(self.scan_btn)
-        self.sync_btn = QPushButton("Sync Accounts")
-        top.addWidget(self.sync_btn)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(24, 22, 24, 16)
+        layout.setSpacing(16)
+        shell.addWidget(content, 1)
+
+        heading = QHBoxLayout()
+        titles = QVBoxLayout()
+        titles.setSpacing(4)
+        titles.addWidget(_label("THE PROJECT DEN", eyebrow=True))
+        self.page_title = _label("All projects")
+        self.page_title.setObjectName("pageTitle")
+        titles.addWidget(self.page_title)
+        self.page_subtitle = _label(PROJECT_VIEWS["all"][1], muted=True)
+        titles.addWidget(self.page_subtitle)
+        heading.addLayout(titles, 1)
         self.ask_btn = QPushButton("Ask AI…")
-        top.addWidget(self.ask_btn)
+        self.ask_btn.setProperty("accent", True)
+        self.ask_btn.setToolTip("Ask across the catalogue")
+        heading.addWidget(self.ask_btn)
+        self.scan_btn = QPushButton("Scan Now")
+        self.scan_btn.setProperty("primary", True)
+        heading.addWidget(self.scan_btn)
+        layout.addLayout(heading)
+
+        metrics = QHBoxLayout()
+        metrics.setSpacing(12)
+        self.metric_buttons = {}
+        for view, title in (("all", "IN THE DEN"), ("git", "GIT REPOS"),
+                            ("dirty", "WITH CHANGES"), ("duplicates", "DUPLICATE CLONES")):
+            button = QPushButton()
+            button.setProperty("metric", True)
+            button.setMinimumHeight(78)
+            metric_layout = QVBoxLayout(button)
+            metric_layout.setContentsMargins(14, 8, 14, 8)
+            metric_layout.setSpacing(1)
+            value = _label()
+            value.setProperty("metricValue", True)
+            caption = _label(title, muted=True)
+            for label in (value, caption):
+                label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                metric_layout.addWidget(label)
+            button.setToolTip(f"Show {PROJECT_VIEWS[view][0].lower()}")
+            button.clicked.connect(lambda _=False, v=view: self._set_view(v))
+            self.metric_buttons[view] = (button, value, title)
+            metrics.addWidget(button, 1)
+        self.metrics_panel = QWidget()
+        metrics.setContentsMargins(0, 0, 0, 0)
+        self.metrics_panel.setLayout(metrics)
+        layout.addWidget(self.metrics_panel)
+        self.feature_panel = self._build_featured()
+        layout.addWidget(self.feature_panel)
+
+        tools = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setObjectName("search")
+        self.search.setAccessibleName("Search projects")
+        self.search.setPlaceholderText("Search projects, paths, languages…  Ctrl+F")
+        self.search.setClearButtonEnabled(True)
+        tools.addWidget(self.search, 1)
         reload_btn = QPushButton("Reload")
-        top.addWidget(reload_btn)
-        settings_btn = QPushButton("Settings")
-        top.addWidget(settings_btn)
-        layout.addLayout(top)
+        reload_btn.setToolTip("Reload catalogue from disk (F5)")
+        tools.addWidget(reload_btn)
+        columns_btn = QPushButton("Columns")
+        tools.addWidget(columns_btn)
+        self.feature_toggle = QPushButton("Featured")
+        self.feature_toggle.setCheckable(True)
+        self.feature_toggle.setChecked(True)
+        self.feature_toggle.toggled.connect(self.feature_panel.setVisible)
+        tools.addWidget(self.feature_toggle)
+        self.details_btn = QPushButton("Inspector")
+        self.details_btn.setCheckable(True)
+        self.details_btn.setChecked(True)
+        tools.addWidget(self.details_btn)
+        layout.addLayout(tools)
 
         self.model = ProjectsModel(self)
         self.proxy = ProjectsProxy(self)
         self.proxy.setSourceModel(self.model)
         self.table = QTableView()
+        self.table.setObjectName("projects")
+        self.table.setAccessibleName("Project catalogue")
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
         self.table.sortByColumn(4, Qt.SortOrder.DescendingOrder)  # Modified
         self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(42)
         hdr = self.table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hdr.setStretchLastSection(True)
         hdr.setSectionsMovable(True)
         hdr.sectionMoved.connect(self._save_column_order)
-        layout.addWidget(self.table)
+        self.results = QStackedWidget()
+        self.results.addWidget(self.table)
+        empty = QWidget()
+        empty_layout = QVBoxLayout(empty)
+        empty_layout.addStretch()
+        self.empty_title = _label()
+        self.empty_title.setObjectName("detailTitle")
+        self.empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_help = _label(muted=True)
+        self.empty_help.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(self.empty_title)
+        empty_layout.addWidget(self.empty_help)
+        reset_btn = QPushButton("Show all projects")
+        reset_btn.clicked.connect(self._reset_filters)
+        empty_layout.addWidget(reset_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addStretch()
+        self.results.addWidget(empty)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setHandleWidth(12)
+        self.splitter.addWidget(self.results)
+        self.inspector = self._build_inspector()
+        self.splitter.addWidget(self.inspector)
+        self.splitter.setCollapsible(0, False)
+        self.splitter.setCollapsible(1, False)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        self.splitter.setSizes([850, 280])
+        layout.addWidget(self.splitter, 1)
         self._restore_column_order()
+        columns_menu = QMenu(self)
+        for col, (title, _) in enumerate(COLUMNS):
+            action = columns_menu.addAction(title)
+            action.setCheckable(True)
+            action.setChecked(col not in (1, 5, 6, 8))
+            self.table.setColumnHidden(col, not action.isChecked())
+            action.toggled.connect(lambda checked, c=col: self.table.setColumnHidden(c, not checked))
+        columns_btn.setMenu(columns_menu)
 
         self.setCentralWidget(central)
         self.count_label = QLabel()
         self.statusBar().addPermanentWidget(self.count_label)
+        self.activity = QPlainTextEdit()
+        self.activity.setReadOnly(True)
+        self.activity.setMaximumBlockCount(500)
+        self.activity.setPlaceholderText("Scan, sync and summary output will appear here.")
+        self.activity_dock = QDockWidget("Activity", self)
+        self.activity_dock.setWidget(self.activity)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.activity_dock)
+        self.activity_dock.hide()
+        self.activity_btn.clicked.connect(
+            lambda: self.activity_dock.setVisible(not self.activity_dock.isVisible())
+        )
 
-        self.search.textChanged.connect(self.proxy.set_needle)
-        self.search.textChanged.connect(self._update_count)
+        self.search.textChanged.connect(self._filter_changed)
         self.scan_btn.clicked.connect(self.start_scan)
         self.sync_btn.clicked.connect(self.start_sync)
         self.ask_btn.clicked.connect(self.ask_ai)
         reload_btn.clicked.connect(self.reload)
-        settings_btn.clicked.connect(self.open_settings)
+        self.details_btn.toggled.connect(self.inspector.setVisible)
         self.table.doubleClicked.connect(self._open_default)
         self.table.customContextMenuRequested.connect(self._context_menu)
+        self.table.selectionModel().selectionChanged.connect(self._update_inspector)
 
         find = QAction(self)
         find.setShortcut(QKeySequence.StandardKey.Find)
         find.triggered.connect(lambda: (self.search.setFocus(), self.search.selectAll()))
         self.addAction(find)
+        reload_action = QAction(self)
+        reload_action.setShortcut(QKeySequence("F5"))
+        reload_action.triggered.connect(self.reload)
+        self.addAction(reload_action)
 
         self.reload()
-        for col, width in ((0, 220), (1, 70), (2, 90), (3, 130), (4, 130), (5, 130), (6, 170), (7, 320), (9, 80)):
+        for col, width in ((0, 210), (1, 80), (2, 95), (3, 115), (4, 155), (5, 155), (6, 170), (7, 280), (9, 95)):
             self.table.setColumnWidth(col, width)
+
+    def _build_sidebar(self) -> QFrame:
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(202)
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(16, 20, 16, 18)
+        layout.setSpacing(8)
+        mascot = QLabel()
+        mascot.setAccessibleName("Cody H. Ound, the codeHOUND mascot")
+        mascot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pixmap = QPixmap(str(MASCOT_PATH))
+        if pixmap.isNull():
+            raise RuntimeError(f"Cannot load mascot image: {MASCOT_PATH}")
+        mascot.setPixmap(pixmap.scaled(160, 190, Qt.AspectRatioMode.KeepAspectRatio,
+                                       Qt.TransformationMode.SmoothTransformation))
+        layout.addWidget(mascot)
+        tagline = _label("GOOD CODE. FOUND.", eyebrow=True)
+        tagline.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(tagline)
+        layout.addSpacing(20)
+        layout.addWidget(_label("CATALOGUE", muted=True))
+        self.nav_group = QButtonGroup(self)
+        self.nav_buttons = {}
+        for key, (title, subtitle) in PROJECT_VIEWS.items():
+            btn = QPushButton(title)
+            btn.setProperty("nav", True)
+            btn.setCheckable(True)
+            btn.setChecked(key == "all")
+            btn.setToolTip(subtitle)
+            btn.clicked.connect(lambda _=False, v=key: self._set_view(v))
+            self.nav_group.addButton(btn)
+            self.nav_buttons[key] = btn
+            layout.addWidget(btn)
+        layout.addStretch()
+        self.sync_btn = QPushButton("Sync Accounts")
+        layout.addWidget(self.sync_btn)
+        self.activity_btn = QPushButton("Activity")
+        layout.addWidget(self.activity_btn)
+        settings = QPushButton("Settings")
+        settings.clicked.connect(self.open_settings)
+        layout.addWidget(settings)
+        return sidebar
+
+    def _build_inspector(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("inspector")
+        panel.setMinimumWidth(245)
+        panel.setMaximumWidth(390)
+        panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(18, 20, 18, 20)
+        layout.setSpacing(12)
+        layout.addWidget(_label("ON THE SCENT", eyebrow=True))
+        self.detail_title = _label("Pick a project")
+        self.detail_title.setObjectName("detailTitle")
+        layout.addWidget(self.detail_title)
+        self.detail_meta = _label(muted=True)
+        layout.addWidget(self.detail_meta)
+        self.detail_description = _label()
+        self.detail_description.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(self.detail_description)
+        self.detail_path = _label(muted=True)
+        self.detail_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(_label("LOCATION", eyebrow=True))
+        layout.addWidget(self.detail_path)
+        layout.addWidget(_label("LATEST COMMIT", eyebrow=True))
+        self.detail_commit = _label(muted=True)
+        layout.addWidget(self.detail_commit)
+        layout.addStretch()
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+        actions = QWidget()
+        action_layout = QVBoxLayout(actions)
+        action_layout.setContentsMargins(14, 4, 14, 14)
+        action_layout.setSpacing(8)
+        launch_row = QHBoxLayout()
+        self.launcher_combo = QComboBox()
+        self.launcher_combo.setAccessibleName("Project launcher")
+        self.launcher_combo.setMinimumContentsLength(6)
+        self.launcher_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        launch_row.addWidget(self.launcher_combo, 1)
+        self.open_btn = QPushButton("Open")
+        self.open_btn.setProperty("primary", True)
+        self.open_btn.clicked.connect(self._open_selected)
+        launch_row.addWidget(self.open_btn)
+        action_layout.addLayout(launch_row)
+        self.project_ask_btn = QPushButton("Ask about this project…")
+        self.project_ask_btn.setProperty("accent", True)
+        self.project_ask_btn.clicked.connect(self._ask_selected)
+        action_layout.addWidget(self.project_ask_btn)
+        utility_row = QHBoxLayout()
+        self.copy_path_btn = QPushButton("Copy path")
+        self.copy_path_btn.clicked.connect(self._copy_selected_path)
+        utility_row.addWidget(self.copy_path_btn)
+        self.pin_btn = QPushButton("Pin")
+        self.pin_btn.clicked.connect(self._pin_selected)
+        self.pin_btn.setToolTip("Keep this project in the featured carousel, beyond the five most recent")
+        utility_row.addWidget(self.pin_btn)
+        action_layout.addLayout(utility_row)
+        outer.addWidget(actions)
+        return panel
+
+    def _load_pins(self) -> set[str]:
+        conn = db.connect()
+        try:
+            raw = db.kv_get(conn, "featured_pins")
+        finally:
+            conn.close()
+        if raw is None:
+            return set()
+        try:
+            paths = json.loads(raw)
+            if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+                raise ValueError("Expected a list of project paths")
+        except (ValueError, TypeError) as error:
+            QMessageBox.warning(self, "Featured projects", f"Could not load pinned projects: {error}")
+            return set()
+        return set(paths)
+
+    def _build_featured(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("featured")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(10)
+        header = QHBoxLayout()
+        feature_heading = _label("CONTINUE THE HUNT", eyebrow=True)
+        feature_heading.setWordWrap(False)
+        header.addWidget(feature_heading)
+        header.addWidget(_label("5 most recent + your pins · across the catalogue", muted=True), 1)
+        self.feature_position = _label()
+        header.addWidget(self.feature_position)
+        self.feature_prev = QPushButton("‹")
+        self.feature_prev.setAccessibleName("Previous featured project")
+        self.feature_next = QPushButton("›")
+        self.feature_next.setAccessibleName("Next featured project")
+        for button, step in ((self.feature_prev, -1), (self.feature_next, 1)):
+            button.setFixedWidth(36)
+            button.clicked.connect(lambda _=False, s=step: self._step_featured(s))
+            header.addWidget(button)
+        layout.addLayout(header)
+        story = QHBoxLayout()
+        story.setSpacing(24)
+        intro = QVBoxLayout()
+        self.feature_name = _label()
+        self.feature_name.setObjectName("featureName")
+        intro.addWidget(self.feature_name)
+        self.feature_meta = _label(muted=True)
+        intro.addWidget(self.feature_meta)
+        intro.addStretch()
+        story.addLayout(intro, 3)
+        summary = QVBoxLayout()
+        summary.addWidget(_label("AI SUMMARY · SAVED", eyebrow=True))
+        self.feature_summary = _label()
+        self.feature_summary.setMinimumHeight(self.feature_summary.fontMetrics().lineSpacing() * 5)
+        self.feature_summary.setAlignment(Qt.AlignmentFlag.AlignTop)
+        summary.addWidget(self.feature_summary)
+        summary.addStretch()
+        story.addLayout(summary, 4)
+        previously = QVBoxLayout()
+        previously.addWidget(_label("PREVIOUSLY… · LAST RECORDED COMMIT", eyebrow=True))
+        self.feature_previous = _label()
+        self.feature_previous.setMinimumHeight(self.feature_previous.fontMetrics().lineSpacing() * 5)
+        self.feature_previous.setAlignment(Qt.AlignmentFlag.AlignTop)
+        previously.addWidget(self.feature_previous)
+        previously.addStretch()
+        story.addLayout(previously, 4)
+        layout.addLayout(story)
+        actions = QHBoxLayout()
+        self.feature_pin = QPushButton("Pin")
+        self.feature_pin.clicked.connect(self._pin_featured)
+        actions.addWidget(self.feature_pin)
+        actions.addStretch()
+        self.feature_inspect = QPushButton("View project")
+        self.feature_inspect.clicked.connect(self._inspect_featured)
+        actions.addWidget(self.feature_inspect)
+        self.feature_brief = QPushButton("Catch me up with AI…")
+        self.feature_brief.setProperty("accent", True)
+        self.feature_brief.clicked.connect(self._brief_featured)
+        actions.addWidget(self.feature_brief)
+        layout.addLayout(actions)
+        return panel
+
+    def _current_featured(self) -> dict | None:
+        return self._featured[self._featured_index] if self._featured else None
+
+    def _refresh_featured(self):
+        current = self._current_featured()
+        self._featured = self.model.featured_projects(self._pinned_paths)
+        self._featured_index = next(
+            (i for i, p in enumerate(self._featured) if current and p["path"] == current["path"]), 0
+        )
+        self._render_featured()
+
+    def _step_featured(self, step: int):
+        if self._featured:
+            self._featured_index = (self._featured_index + step) % len(self._featured)
+            self._render_featured()
+
+    def _render_featured(self):
+        from .ai import is_configured
+        project = self._current_featured()
+        self.feature_prev.setEnabled(len(self._featured) > 1)
+        self.feature_next.setEnabled(len(self._featured) > 1)
+        self.feature_inspect.setEnabled(project is not None)
+        self.feature_pin.setEnabled(project is not None)
+        self.feature_brief.setEnabled(project is not None and is_configured(self.cfg))
+        self.feature_brief.setToolTip(
+            "Request a fresh briefing from project files and recent git history"
+            if is_configured(self.cfg) else "Configure a provider in Settings → AI"
+        )
+        if not project:
+            self.feature_position.setText("0 / 0")
+            self.feature_name.setText("Your next discovery")
+            self.feature_meta.setText("Scan to bring your projects into view.")
+            self.feature_summary.setText("Saved AI descriptions will appear here.")
+            self.feature_previous.setText("Recent commit context, without the archaeology.")
+            self.feature_pin.setText("Pin")
+            return
+        self.feature_position.setText(f"{self._featured_index + 1} / {len(self._featured)}")
+        self.feature_name.setText(self._excerpt(project_label(project), 55))
+        self.feature_name.setToolTip(f"{project_label(project)}\n{project['path']}")
+        self.feature_meta.setText(" · ".join(str(v) for v in (
+            project.get("language"), project.get("branch"),
+            "Pinned" if project["path"] in self._pinned_paths else "Recently active",
+        ) if v))
+        description = project.get("description") or "No saved summary yet. Request an AI catch-up to explore this project."
+        previous = project.get("last_commit_msg") or "No commit recorded. This may be a loose project or an empty repository."
+        if project.get("last_commit_date"):
+            previous = f"{project['last_commit_date'][:10]} — {previous}"
+        self.feature_summary.setText(self._excerpt(description, 180))
+        self.feature_summary.setToolTip(description)
+        self.feature_previous.setText(self._excerpt(previous, 180))
+        self.feature_previous.setToolTip(previous)
+        self.feature_pin.setText("Unpin" if project["path"] in self._pinned_paths else "Pin")
+
+    @staticmethod
+    def _excerpt(text: str, limit: int) -> str:
+        text = " ".join(text.split())
+        return text if len(text) <= limit else text[:limit - 1] + "…"
+
+    def _toggle_pin(self, path: str):
+        pins = self._pinned_paths ^ {path}
+        conn = db.connect()
+        try:
+            db.kv_set(conn, "featured_pins", json.dumps(sorted(pins)))
+            conn.commit()
+        finally:
+            conn.close()
+        self._pinned_paths = pins
+        self._refresh_featured()
+        self._update_inspector()
+
+    def _pin_selected(self):
+        path = self._selected_path()
+        if path:
+            self._toggle_pin(path)
+
+    def _pin_featured(self):
+        project = self._current_featured()
+        if project:
+            self._toggle_pin(project["path"])
+
+    def _inspect_featured(self):
+        project = self._current_featured()
+        if project:
+            self._reset_filters()
+            for row in range(self.proxy.rowCount()):
+                if self.proxy.index(row, 0).data(PATH_ROLE) == project["path"]:
+                    self.table.selectRow(row)
+                    self.table.scrollTo(self.proxy.index(row, 0))
+                    break
+            self.details_btn.setChecked(True)
+
+    def _brief_featured(self):
+        project = self._current_featured()
+        if project:
+            self._ask_about(project["path"], (
+                "Catch me up on this project. Briefly cover its purpose, what the recent commits "
+                "and working tree show was being worked on, and any documented TODOs or next steps. "
+                "Separate implemented work from plans. Cite files or commits and do not invent "
+                "previous conversations or work that is not in the supplied context."
+            ))
+
+    def _set_view(self, view: str):
+        self._view = view
+        self.nav_buttons[view].setChecked(True)
+        self.page_title.setText(PROJECT_VIEWS[view][0])
+        self.page_subtitle.setText(PROJECT_VIEWS[view][1])
+        self.proxy.set_view(view)
+        self._update_count()
+        self._update_inspector()
+
+    def _filter_changed(self, text: str):
+        self.proxy.set_needle(text)
+        self._update_count()
+        self._update_inspector()
+
+    def _reset_filters(self):
+        self.search.clear()
+        self._set_view("all")
+
+    def _update_inspector(self, *_args):
+        from .ai import is_configured
+        indexes = self.table.selectionModel().selectedRows()
+        proj = self.model.row(self.proxy.mapToSource(indexes[0]).row()) if indexes else None
+        ready = bool(proj and not proj.get("missing"))
+        self.open_btn.setEnabled(ready and self.launcher_combo.count() > 0)
+        self.launcher_combo.setEnabled(ready and self.launcher_combo.count() > 0)
+        self.project_ask_btn.setEnabled(ready and is_configured(self.cfg))
+        self.project_ask_btn.setToolTip(
+            "Ask using project files and git history" if is_configured(self.cfg)
+            else "Configure a provider in Settings → AI"
+        )
+        self.copy_path_btn.setEnabled(proj is not None)
+        self.pin_btn.setEnabled(proj is not None)
+        self.pin_btn.setText(
+            "Unpin" if proj and proj["path"] in self._pinned_paths else "Pin"
+        )
+        if not proj:
+            self.detail_title.setText("Pick a project")
+            self.detail_meta.setText("A little context goes a long way.")
+            self.detail_description.setText("Select a row to see its story, open your tools or ask AI.")
+            self.detail_path.setText("No project selected")
+            self.detail_commit.setText("No project selected")
+            return
+        self.detail_title.setText(project_label(proj))
+        state = "Missing on last scan" if proj.get("missing") else (
+            "Uncommitted changes" if proj.get("dirty") else
+            "Clean working tree" if proj.get("kind") == "git" else "No working tree"
+        )
+        self.detail_meta.setText(" · ".join(
+            str(v) for v in (proj.get("language"), proj.get("branch"), state) if v
+        ))
+        self.detail_description.setText(proj.get("description") or "No description yet. Ask AI to explore this project.")
+        self.detail_path.setText(proj["path"])
+        self.detail_commit.setText(proj.get("last_commit_msg") or "No commit recorded.")
+
+    def _open_selected(self):
+        path = self._selected_path()
+        name = self.launcher_combo.currentText()
+        if path and name:
+            launchers.launch(self.cfg, name, path)
+
+    def _ask_selected(self):
+        path = self._selected_path()
+        if path:
+            self._ask_custom(path)
+
+    def _copy_selected_path(self):
+        path = self._selected_path()
+        if path:
+            QGuiApplication.clipboard().setText(path)
 
     # ----- columns -----
     def _save_column_order(self, *_args):
@@ -188,9 +689,21 @@ class Dashboard(QMainWindow):
 
     # ----- data -----
     def reload(self):
+        path = self._selected_path()
         self.cfg = load_config()
         self.model.refresh()
+        chosen_launcher = self.launcher_combo.currentText()
+        self.launcher_combo.clear()
+        self.launcher_combo.addItems(launchers.launcher_names(self.cfg))
+        if chosen_launcher in launchers.launcher_names(self.cfg):
+            self.launcher_combo.setCurrentText(chosen_launcher)
+        for row in range(self.proxy.rowCount()):
+            if self.proxy.index(row, 0).data(PATH_ROLE) == path:
+                self.table.selectRow(row)
+                break
         self._update_count()
+        self._update_inspector()
+        self._refresh_featured()
         conn = db.connect()
         last = db.last_scan(conn)
         digest_at = db.kv_get(conn, "ai_digest_at")
@@ -221,6 +734,19 @@ class Dashboard(QMainWindow):
 
     def _update_count(self):
         self.count_label.setText(f"{self.proxy.rowCount()}/{self.model.rowCount()} projects")
+        counts = self.model.view_counts()
+        for view, button in self.nav_buttons.items():
+            button.setText(f"{PROJECT_VIEWS[view][0]}  ·  {counts[view]}")
+        for view, (button, value, title) in self.metric_buttons.items():
+            value.setText(str(counts[view]))
+            button.setAccessibleName(f"{counts[view]} {title.lower()}")
+        has_rows = self.proxy.rowCount() > 0
+        self.results.setCurrentIndex(0 if has_rows else 1)
+        self.empty_title.setText("Nothing on the radar yet" if not self.model.rowCount() else "No matching projects")
+        self.empty_help.setText(
+            "Choose your search roots in Settings, then Scan Now."
+            if not self.model.rowCount() else "Try a different search or catalogue view."
+        )
 
     # ----- background CLI tasks (scan / sync) -----
     def _start_cli(self, attr: str, args: list[str], btn: QPushButton, busy: str, idle: str):
@@ -234,8 +760,17 @@ class Dashboard(QMainWindow):
             lambda: self._task_output(proc.readAllStandardOutput().data().decode(errors="replace"))
         )
         proc.finished.connect(lambda code, _s: self._task_finished(attr, code, btn, idle, args[0]))
-        proc.start(sys.executable, ["-m", "codehound.cli", *args])
+        proc.errorOccurred.connect(
+            lambda error: self._task_start_error(error, proc, attr, btn, idle, args[0])
+        )
         setattr(self, attr, proc)
+        self.activity.appendPlainText(f"$ codehound {' '.join(args)}")
+        proc.start(sys.executable, ["-m", "codehound.cli", *args])
+
+    def _task_start_error(self, error, proc, attr, btn, idle, what):
+        if error == QProcess.ProcessError.FailedToStart:
+            self._task_output(f"{what} could not start: {proc.errorString()}")
+            self._task_finished(attr, -1, btn, idle, what)
 
     def start_scan(self):
         self._start_cli("_scan_proc", ["scan"], self.scan_btn, "Scanning…", "Scan Now")
@@ -252,17 +787,23 @@ class Dashboard(QMainWindow):
                         self.ask_btn, "Summarising…", "Ask AI…")
 
     def _task_output(self, text: str):
+        self.activity.appendPlainText(text.rstrip())
         line = text.strip().splitlines()
         if line:
             self.statusBar().showMessage(line[-1][:200])
 
     def _task_finished(self, attr: str, code: int, btn: QPushButton, idle: str, what: str):
+        proc = getattr(self, attr)
         setattr(self, attr, None)
+        if proc is not None:
+            proc.deleteLater()
         btn.setEnabled(True)
         btn.setText(idle)
         self.reload()
+        self.activity.appendPlainText(f"{what} finished with exit code {code}")
         if code != 0:
-            self.statusBar().showMessage(f"{what} exited with code {code} — see journal/config")
+            self.activity_dock.show()
+            self.statusBar().showMessage(f"{what} exited with code {code} — see Activity")
 
     # ----- actions -----
     def open_settings(self):
@@ -399,6 +940,11 @@ class Dashboard(QMainWindow):
             QMessageBox.warning(self, "Adopt failed", output[-1000:] or f"exit code {code}")
 
     # ----- window management -----
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "metrics_panel"):
+            self.metrics_panel.setVisible(event.size().height() >= 820)
+
     def closeEvent(self, event):
         event.ignore()
         self.hide()
@@ -406,15 +952,16 @@ class Dashboard(QMainWindow):
 
 def run_app() -> int:
     app = QApplication(sys.argv)
+    apply_theme(app)
     app.setApplicationName("codeHOUND")
     app.setDesktopFileName("codehound")
     app.setQuitOnLastWindowClosed(False)
     # The tray icon must come from the icon theme: StatusNotifier sends the
     # icon by *name* over D-Bus, and a QIcon built from a lone file path has
     # no name — so the panel got an empty IconName and rendered nothing.
-    # QIcon.fromTheme(name, fallback) gives us a named icon with the SVG as
+    # QIcon.fromTheme(name, fallback) gives us a named icon with Cody as
     # the fallback pixmap for environments without the theme icon installed.
-    icon = QIcon.fromTheme("codehound", QIcon(str(ICON_PATH)))
+    icon = QIcon.fromTheme("codehound-cody", QIcon(str(ICON_PATH)))
     app.setWindowIcon(icon)
 
     win = Dashboard()
