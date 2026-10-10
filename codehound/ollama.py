@@ -124,18 +124,33 @@ def describe(cfg: Config, path: str, name: str, language: str | None) -> str | N
     return desc or None
 
 
-def classify(cfg: Config, path: str) -> bool:
-    """Ask the model whether an ambiguous directory is a software project."""
+def classify_detail(cfg: Config, path: str) -> tuple[bool | None, str]:
+    """Classify an ambiguous directory. Returns (verdict, note).
+
+    verdict is True/False for a project/non-project answer, or None when no
+    answer could be obtained; note says why (or quotes the model's reply).
+    """
     ctx = _project_context(path)
     if not ctx:
-        return False
+        return None, "unreadable directory"
     prompt = (
         f"Is the directory '{os.path.basename(path)}' a software project "
         f"(source code someone is developing), as opposed to downloads, backups, media, "
         f"or application data? Answer with exactly YES or NO.\n\n{ctx}"
     )
     ans = _generate(cfg, prompt, num_predict=5)
-    return bool(ans) and ans.upper().startswith("YES")
+    if not ans:
+        return None, "no response from model (timeout or error)"
+    if ans.upper().startswith("YES"):
+        return True, ans
+    if ans.upper().startswith("NO"):
+        return False, ans
+    return False, f"unclear answer {ans!r}"
+
+
+def classify(cfg: Config, path: str) -> bool:
+    """Ask the model whether an ambiguous directory is a software project."""
+    return bool(classify_detail(cfg, path)[0])
 
 
 def enrich(cfg: Config, progress=None) -> int:
