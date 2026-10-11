@@ -1,5 +1,5 @@
 Name:           codehound
-Version:        0.5.0
+Version:        0.5.0.2
 Release:        1%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
@@ -79,7 +79,13 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
-* Mon Oct 12 2026 zacpr <zac@ashurtech.net> - 0.5.0-1
+* Sun Oct 11 2026 zacpr <zac@ashurtech.net> - 0.5.0.2-1
+- Fix: an RPM upgrade left the per-user systemd units behind, so the
+  scan timer kept running the old command line (no 'updates --check').
+  Units are stamped with a version marker; the first scan or app start
+  after an upgrade rewrites them and reloads systemd.
+
+* Sun Oct 11 2026 zacpr <zac@ashurtech.net> - 0.5.0-1
 - Update manager: watches GitHub releases for every project in the
   catalogue and notifies when updates land (tray + CLI + timer)
 - codehound updates / update: check, download, verify (published
