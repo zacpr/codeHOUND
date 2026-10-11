@@ -1,5 +1,5 @@
 Name:           codehound
-Version:        0.4.0
+Version:        0.5.0
 Release:        1%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
@@ -79,6 +79,24 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Sun Oct 12 2026 zacpr <zac@ashurtech.net> - 0.5.0-1
+- Update manager: watches GitHub releases for every project in the
+  catalogue and notifies when updates land (tray + CLI + timer)
+- codehound updates / update: check, download, verify (published
+  SHA256 when available) and install release assets into a private
+  catalogue-managed installs/ tree, with activation, rollback and
+  adoption of existing launchers
+- Auto-update policy: stage-then-confirm — updates are downloaded and
+  verified in the background, never swapped under a running app
+- System installs: codehound update REPO --system installs .rpm/.deb
+  release assets via pkexec (dnf/yum/apt/dpkg/rpm)
+- Self-update: codehound self-update and a tray "Update codeHOUND…"
+  entry compare the newest release against the installed version,
+  install via pkexec, and quit-and-relaunch the tray app
+- safepath: single chokepoint for every recursive delete, with a
+  per-OS blacklist and containment checks; managed-install paths are
+  validated against tampered catalogue rows
+
 * Sun Oct 11 2026 zacpr <zac@ashurtech.net> - 0.4.0-1
 - codehound detect: finds installed editors, AI agent CLIs (Claude Code,
   Codex, Gemini, Aider, Copilot, Cody, Kimi) wrapped in a terminal, and
