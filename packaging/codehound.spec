@@ -79,7 +79,7 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
-* Sun Oct 12 2026 zacpr <zac@ashurtech.net> - 0.5.0-1
+* Mon Oct 12 2026 zacpr <zac@ashurtech.net> - 0.5.0-1
 - Update manager: watches GitHub releases for every project in the
   catalogue and notifies when updates land (tray + CLI + timer)
 - codehound updates / update: check, download, verify (published
