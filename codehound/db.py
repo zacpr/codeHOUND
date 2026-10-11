@@ -55,9 +55,28 @@ CREATE TABLE IF NOT EXISTS updates (
     auto          INTEGER,              -- NULL = follow default, 1 = auto-install, 0 = never
     seen          INTEGER DEFAULT 1,
     last_checked  TEXT,
-    last_install  TEXT
+    last_install  TEXT,
+    install_mode  TEXT,                 -- managed | inplace | custom ('' = never installed)
+    install_dir   TEXT,                 -- where the current version lives
+    install_exe   TEXT,                 -- executable we manage/symlink
+    prev_dir      TEXT,                 -- previous version dir, for rollback
+    install_path  TEXT,                 -- user-chosen custom install location
+    installed_tag TEXT,                 -- version currently installed by us
+    prev_tag      TEXT                  -- previous installed version (rollback target)
 );
 """
+
+# Columns added after the first release of the updates table — older databases
+# get them ALTERed in on connect.
+_UPDATE_COLUMNS = {
+    "install_mode": "TEXT",
+    "install_dir": "TEXT",
+    "install_exe": "TEXT",
+    "prev_dir": "TEXT",
+    "install_path": "TEXT",
+    "installed_tag": "TEXT",
+    "prev_tag": "TEXT",
+}
 
 UPSERT_COLS = [
     "path", "kind", "name", "root", "language", "branch", "remote_url",
@@ -77,7 +96,15 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=15000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    _migrate_updates(conn)
     return conn
+
+
+def _migrate_updates(conn: sqlite3.Connection) -> None:
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(updates)")}
+    for col, decl in _UPDATE_COLUMNS.items():
+        if col not in have:
+            conn.execute(f"ALTER TABLE updates ADD COLUMN {col} {decl}")
 
 
 def upsert_project(conn: sqlite3.Connection, proj: dict) -> None:
@@ -209,6 +236,22 @@ def note_update_install(conn: sqlite3.Connection, repo: str) -> None:
         "UPDATE updates SET last_install = ?, available = 0, seen = 1 WHERE repo = ?",
         (now(), repo),
     )
+
+
+def set_install(conn: sqlite3.Connection, repo: str, *, mode: str, install_dir: str,
+                install_exe: str, prev_dir: str, installed_tag: str,
+                prev_tag: str) -> None:
+    """Record where a repo's app is installed and what to roll back to."""
+    conn.execute(
+        """UPDATE updates SET install_mode=?, install_dir=?, install_exe=?, prev_dir=?,
+                          installed_tag=?, prev_tag=?, last_install=?, available=0, seen=1
+           WHERE repo=?""",
+        (mode, install_dir, install_exe, prev_dir, installed_tag, prev_tag, now(), repo),
+    )
+
+
+def set_update_install_path(conn: sqlite3.Connection, repo: str, path: str) -> None:
+    conn.execute("UPDATE updates SET install_path = ? WHERE repo = ?", (path, repo))
 
 
 def kv_set(conn: sqlite3.Connection, key: str, value: str) -> None:

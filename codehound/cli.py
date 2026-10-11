@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from . import __version__
 from .config import CONFIG_PATH, ensure_config, load_config
@@ -307,6 +308,8 @@ def cmd_updates(args) -> int:
             _say(f"  {row['repo']}: {have} → {row['latest_tag']}  [{mark}]")
             if row["asset_name"]:
                 _say(f"      asset: {row['asset_name']}")
+            if row["installed_tag"]:
+                _say(f"      installed by codeHOUND: {row['installed_tag']} ({row['install_mode']})")
         return 0
     finally:
         conn.close()
@@ -315,6 +318,65 @@ def cmd_updates(args) -> int:
 def cmd_install_timer(args) -> int:
     from .install import install_timer
     return install_timer(every=args.every)
+
+
+def _resolve_repo(conn, name: str) -> str | None:
+    """owner/repo from an exact match, a repo-name fragment, or fuzzy name."""
+    import difflib
+    rows = conn.execute("SELECT repo, name FROM updates").fetchall()
+    name_l = name.lower()
+    for r in rows:
+        if r["repo"].lower() == name_l:
+            return r["repo"]
+    hits = [r["repo"] for r in rows if name_l in r["repo"].lower()]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        _say(f"{name} is ambiguous: " + ", ".join(sorted(hits)))
+        return None
+    close = difflib.get_close_matches(name_l, [r["repo"].lower() for r in rows], n=1)
+    if close:
+        _say(f"did you mean {close[0]}?")
+    return None
+
+
+def cmd_update(args) -> int:
+    from . import db, updates
+    from .providers.base import SyncError
+
+    conn = db.connect()
+    try:
+        repo = _resolve_repo(conn, args.repo)
+        if repo is None:
+            _say(f"{args.repo} is not on the watch list — run 'codehound updates --check' first")
+            return 1
+        if args.rollback:
+            try:
+                _say(updates.rollback_update(conn, repo, progress=_say))
+            except SyncError as e:
+                _say(f"rollback: {e}")
+                return 1
+            return 0
+        if args.set_path is not None:
+            if args.set_path:
+                p = Path(args.set_path).expanduser()
+                if p.exists() and not p.is_dir() and not p.is_file():
+                    _say(f"{p} is not a file or directory")
+                    return 1
+            db.set_update_install_path(conn, repo, args.set_path)
+            conn.commit()
+            _say(f"{repo}: custom install location "
+                 + (f"set to {args.set_path}" if args.set_path else "cleared"))
+            return 0
+        try:
+            _say(updates.install_update(cfg=load_config(), conn=conn, repo=repo,
+                                        progress=_say, exe_name=args.exe))
+        except SyncError as e:
+            _say(f"update: {e}")
+            return 1
+        return 0
+    finally:
+        conn.close()
 
 
 def cmd_install_autostart(args) -> int:
@@ -392,6 +454,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--mode", choices=["auto", "never", "default"], default="default",
                    help="mode for --auto (default: follow global)")
     p.set_defaults(func=cmd_updates)
+
+    p = sub.add_parser("update", help="install (or roll back) a watched repo's latest release")
+    p.add_argument("repo", help="owner/repo (or a name fragment) on the watch list")
+    p.add_argument("--rollback", action="store_true", help="restore the previously installed version")
+    p.add_argument("--exe", help="executable name inside the asset, when it can't be guessed")
+    p.add_argument("--set-path", metavar="PATH",
+                   help="install this repo here instead (blank clears the override)")
+    p.set_defaults(func=cmd_update)
 
     p = sub.add_parser("install-timer", help="install + enable the systemd user scan timer")
     p.add_argument("--every", default="6h", help="scan interval (systemd time span, default 6h)")

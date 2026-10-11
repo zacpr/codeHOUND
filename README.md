@@ -81,6 +81,8 @@ codehound janitor           # dry-run: show clones whose remote work is done
 codehound janitor --force   # actually remove them
 codehound updates           # list known updates for watched GitHub repos
 codehound updates --check   # refresh from the GitHub API first, then list
+codehound update REPO       # download + install the newest release of REPO
+codehound update REPO --rollback   # put the previous version back
 ```
 
 ## The dashboard
@@ -201,12 +203,24 @@ GitHub API for each repo's newest published release and compares it with the loc
 checkout's tag. When a newer release exists, codeHOUND picks the release asset that
 matches your OS and CPU architecture (AppImage/RPM/DEB/archives ranked; source archives
 and foreign-arch builds skipped) and tells you — tray notification plus
-`codehound updates` — with the asset it would install. Nothing is downloaded or
-installed yet; automatic installs are planned for a later release.
+`codehound updates`.
 
-- `codehound updates` lists what is known; `--check` refreshes from the API first.
-- `codehound updates --auto OWNER/REPO --mode auto|never|default` marks a single repo
-  for (or out of) future automatic installs; `default` follows the global `[updates] mode`.
+**Installing**: `codehound update OWNER/REPO` (a name fragment works too) downloads the
+matched asset, verifies its SHA-256 when the publisher provides one (a `SHA256SUMS`
+asset or a hash in the release notes), and installs it:
+
+- a custom location you set with `codehound update REPO --set-path DIR` wins;
+- otherwise an existing managed binary is replaced in place (old copy kept as
+  `*.codehound-bak`);
+- otherwise the release lands in `~/.local/share/codehound/installs/<repo>/<version>/`
+  with a symlink in `~/.local/bin` (make sure it is on your PATH).
+
+`codehound update REPO --rollback` puts the previous version back. AppImage, zip and
+tar archives install user-land; RPM and DEB payloads are unpacked without root (a
+system package install via pkexec is planned). Automatic installs are the next phase:
+`codehound updates --auto OWNER/REPO --mode auto|never|default` marks a single repo for
+(or out of) them; `default` follows the global `[updates] mode`.
+
 - Private repos and heavy polling need authentication: set a GitHub `token` in
   Settings → Accounts, or log in with the **gh** CLI — anonymous API access is limited
   to 60 requests/hour and private repos appear as 404s.

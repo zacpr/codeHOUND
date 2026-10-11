@@ -1,21 +1,33 @@
 """GitHub release watch — spot newer releases of catalogued projects.
 
-Phase 1 (read-only): build a watch list from catalogue rows that have a GitHub
-remote, ask the Releases API what the newest published release is, match its
-assets against this machine's OS/arch, and record the result in the `updates`
-table. `codehound updates` prints it; the tray app bubbles a notification.
+Phase 1: build a watch list from catalogue rows that have a GitHub remote, ask
+the Releases API what the newest published release is, match its assets against
+this machine's OS/arch, and record the result in the `updates` table.
+Phase 2: `install_update` downloads the matched asset, verifies its SHA-256
+(from a SHA256SUMS asset or a hash in the release body when published), and
+installs it — replacing an existing managed/app binary in place when practical,
+otherwise into a managed dir (`installs/<repo>/<version>/`) with a symlink in
+`~/.local/bin`. The previous version is kept for `rollback_update`.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import platform
+import shlex
 import re
 import shutil
 import sqlite3
+import tarfile
+import zipfile
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from . import db
+from .config import DATA_DIR
 from .providers.base import SyncError, http_json, run
 
 API = "https://api.github.com"
@@ -184,6 +196,394 @@ def _latest_release(cfg, repo: str) -> dict | None:
     releases = _api_get(cfg, f"repos/{repo}/releases?per_page=10")
     published = [r for r in releases if not r.get("draft") and not r.get("prerelease")]
     return published[0] if published else None
+
+
+# ---------------------------------------------------------------- installation
+
+# Formats phase 2 can install without admin rights. rpm/deb payloads are
+# unpacked user-land (rpm2cpio/ar); installing them system-wide via pkexec is
+# a later phase.
+_INSTALLABLE = (".appimage", ".zip", ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2",
+                ".tar.zst", ".rpm", ".deb")
+
+_HEX64 = re.compile(r"\b([0-9a-f]{64})\b")
+
+
+def downloads_dir() -> Path:
+    d = DATA_DIR / "downloads"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def installs_dir() -> Path:
+    d = DATA_DIR / "installs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def user_bin_dir() -> Path:
+    d = Path.home() / ".local" / "bin"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def slug(repo: str) -> str:
+    return repo.split("/", 1)[1].lower().replace(" ", "-")
+
+
+def download_asset(url: str, dest: Path, headers: dict | None = None) -> Path:
+    """Stream a release asset to disk (GitHub redirects to the CDN)."""
+    req = Request(url, headers={"User-Agent": "codehound", **(headers or {})})
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    try:
+        with urlopen(req, timeout=120) as resp, open(tmp, "wb") as fh:
+            shutil.copyfileobj(resp, fh)
+    except (OSError, ValueError) as e:
+        tmp.unlink(missing_ok=True)
+        raise SyncError(f"download failed: {e}") from e
+    tmp.rename(dest)
+    return dest
+
+
+def sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def published_sha256(release: dict, asset_name: str) -> str:
+    """Expected SHA-256 for an asset, from a SHA256SUMS asset or the release
+    body; '' when the publisher did not provide one."""
+    for a in release.get("assets", []):
+        name = (a.get("name") or "").lower()
+        if name.startswith("sha256sums") and name.endswith((".txt", ".asc", "")):
+            try:
+                req = Request(a["browser_download_url"],
+                              headers={"User-Agent": "codehound"})
+                with urlopen(req, timeout=60) as resp:
+                    text = resp.read().decode("utf-8", "replace")
+            except (OSError, ValueError, KeyError):
+                continue
+            for line in text.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[1].lstrip("*") == asset_name:
+                    return parts[0].lower()
+    body = release.get("body") or ""
+    # <hash>  <name> or <name> ... <hash> lines in release notes
+    for line in body.splitlines():
+        if asset_name.lower() in line.lower():
+            m = _HEX64.search(line)
+            if m:
+                return m.group(1)
+    return ""
+
+
+def extract_archive(archive: Path, dest: Path) -> None:
+    """Unpack a release asset into dest (created). Handles the phase-2 formats."""
+    dest.mkdir(parents=True, exist_ok=True)
+    name = archive.name.lower()
+    if name.endswith(".appimage"):
+        shutil.copy2(archive, dest / archive.name)
+        (dest / archive.name).chmod(0o755)
+        return
+    if name.endswith(".zip"):
+        with zipfile.ZipFile(archive) as zf:
+            _safe_zip_members(zf, dest)
+        return
+    if name.endswith(".rpm"):
+        if not (shutil.which("rpm2cpio") and shutil.which("cpio")):
+            raise SyncError("rpm payload needs rpm2cpio and cpio")
+        run(["sh", "-c",
+             f"cd {shlex.quote(str(dest))} && "
+             f"rpm2cpio {shlex.quote(str(archive))} | cpio -idm --quiet"])
+        return
+    if name.endswith(".deb"):
+        if not shutil.which("ar"):
+            raise SyncError("deb payload needs ar")
+        work = dest / "_deb"
+        work.mkdir(parents=True, exist_ok=True)
+        if _ar_supports_output():
+            run(["ar", "x", str(archive), "--output", str(work)])
+        else:
+            run(["sh", "-c",
+                 f"cd {shlex.quote(str(work))} && ar x {shlex.quote(str(archive))}"])
+        data = next((f for f in work.iterdir()
+                     if f.name.startswith("data.tar")), None)
+        if not data:
+            raise SyncError("deb has no data.tar member")
+        _extract_tar(data, dest)
+        shutil.rmtree(work, ignore_errors=True)
+        return
+    if ".tar" in name:
+        _extract_tar(archive, dest)
+        return
+    raise SyncError(f"cannot install asset format: {archive.name}")
+
+
+def _ar_supports_output() -> bool:
+    try:
+        return "--output" in run(["ar", "--help"], timeout=10)
+    except SyncError:
+        return False
+
+
+def _safe_zip_members(zf: zipfile.ZipFile, dest: Path) -> None:
+    root = dest.resolve()
+    for info in zf.infolist():
+        target = (dest / info.filename).resolve()
+        if not str(target).startswith(str(root)):
+            raise SyncError(f"unsafe path in zip: {info.filename}")
+        if info.is_dir():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with zf.open(info) as src, open(target, "wb") as out:
+            shutil.copyfileobj(src, out)
+        mode = info.external_attr >> 16
+        if mode:
+            target.chmod(mode & 0o7777)
+
+
+def _extract_tar(archive: Path, dest: Path) -> None:
+    name = archive.name.lower()
+    if name.endswith(".tar.zst"):
+        # python tarfile gained zstd only in 3.14 — use bsdtar when available
+        if shutil.which("bsdtar"):
+            run(["bsdtar", "-xf", str(archive), "-C", str(dest)])
+            return
+        if "r:zstd" not in getattr(tarfile, "compressions", {}):
+            raise SyncError("zstd archives need bsdtar (or Python 3.14+)")
+    try:
+        with tarfile.open(archive) as tf:
+            tf.extractall(dest, filter="data")
+    except (tarfile.TarError, OSError) as e:
+        raise SyncError(f"extract failed: {e}") from e
+
+
+def find_executable(root: Path, want: str) -> Path | None:
+    """Best guess at the runnable app inside an unpacked release.
+
+    Prefers an exact/loose name match (repo name), then a lone executable at
+    the top level, then AppRun, then bin/<anything>. Returns None when the
+    layout is ambiguous — the caller asks the user to point at it.
+    """
+    want_l = want.lower().replace("-", "").replace("_", "")
+    # real executables first — RPM/DEB payloads often ship dangling /usr/bin
+    # symlinks whose target only exists once installed system-wide
+    files = [p for p in root.rglob("*")
+             if p.is_file() and not p.is_symlink() and os.access(p, os.X_OK)]
+    if not files:
+        files = [p for p in root.rglob("*") if p.is_file() and os.access(p, os.X_OK)]
+    if not files:
+        return None
+    # strip common single-wrapper dirs (AppImage dirs, <name>-<ver>/)
+    def depth(p: Path) -> int:
+        return len(p.relative_to(root).parts)
+    exact = [p for p in files if p.name.lower().replace("-", "").replace("_", "") == want_l]
+    if exact:
+        return min(exact, key=depth)
+    apprun = [p for p in files if p.name == "AppRun"]
+    if apprun:
+        return apprun[0]
+    top = [p for p in files if depth(p) == 1]
+    if len(top) == 1:
+        return top[0]
+    bins = [p for p in files if p.parent.name == "bin" and depth(p) == 2]
+    if len(bins) == 1:
+        return bins[0]
+    return None
+
+
+def _existing_target(row: sqlite3.Row) -> Path | None:
+    """The executable a previous codeHOUND install (or the clone's app binary)
+    put on PATH — replaced in place when it exists."""
+    if row["install_exe"]:
+        p = Path(row["install_exe"])
+        if p.is_file() or p.is_symlink():
+            return p
+    link = Path.home() / ".local" / "bin" / slug(row["repo"])
+    if link.is_file() or link.is_symlink():
+        return link
+    return None
+
+
+def install_update(cfg, conn: sqlite3.Connection, repo: str, progress=print,
+                   exe_name: str | None = None) -> str:
+    """Download and install the matched asset for one repo. Returns a summary.
+
+    Ladder: custom install_path > replace existing managed binary in place >
+    managed dir with a ~/.local/bin symlink. Keeps the previous version dir
+    for rollback. Raises SyncError on any failure (nothing is moved until the
+    download and checksum pass).
+    """
+    row = db.get_update(conn, repo)
+    if row is None:
+        raise SyncError(f"{repo} is not on the watch list")
+    if not row["available"] or not row["asset_url"] or not row["asset_name"]:
+        raise SyncError(f"{repo}: no compatible update to install "
+                        f"({row['reason'] or 'run updates --check first'})")
+    if not row["asset_name"].lower().endswith(_INSTALLABLE):
+        raise SyncError(f"{repo}: cannot install {row['asset_name']} yet "
+                        "(unsupported asset format)")
+
+    # 1. download + verify before touching anything installed
+    fname = f"{repo.replace('/', '__')}__{row['asset_name']}"
+    archive = downloads_dir() / fname
+    progress(f"downloading {row['asset_name']}…")
+    download_asset(row["asset_url"], archive)
+    # fetch the release again by tag to look for a published SHA-256
+    try:
+        release = _release_by_tag(cfg, repo, row["latest_tag"])
+        expected = published_sha256(release, row["asset_name"]) if release else ""
+    except SyncError:
+        expected = ""
+    actual = sha256_of(archive)
+    if expected:
+        if actual != expected:
+            archive.unlink(missing_ok=True)
+            raise SyncError(f"{repo}: SHA-256 mismatch — refusing to install "
+                            f"(expected {expected[:12]}…, got {actual[:12]}…)")
+        progress("sha256 verified")
+    else:
+        progress("no published checksum found — installing unverified")
+
+    # 2. unpack to a staging dir
+    stage = downloads_dir() / f"stage-{fname}"
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir(parents=True)
+    extract_archive(archive, stage)
+    exe = find_executable(stage, slug(repo))
+    if exe is None and exe_name:
+        cand = next((p for p in stage.rglob(exe_name) if p.is_file()), None)
+        exe = cand
+    if exe is None:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise SyncError(f"{repo}: could not find the app executable in "
+                        f"{row['asset_name']} — pass --exe NAME")
+
+    # 3. choose the install mode (ladder)
+    custom = (row["install_path"] or "").strip()
+    if custom:
+        return _install_custom(conn, row, stage, exe, Path(custom), progress)
+    existing = _existing_target(row)
+    if existing is not None:
+        return _install_inplace(conn, row, stage, exe, existing, progress)
+    return _install_managed(conn, row, stage, exe, progress)
+
+
+def _release_by_tag(cfg, repo: str, tag: str) -> dict | None:
+    try:
+        rel = _api_get(cfg, f"repos/{repo}/releases/tags/{tag}")
+        return rel if isinstance(rel, dict) else None
+    except SyncError:
+        return _latest_release(cfg, repo)
+
+
+def _finalize(conn, row, mode, install_dir, install_exe, prev_dir, progress):
+    db.set_install(conn, row["repo"], mode=mode, install_dir=str(install_dir),
+                   install_exe=str(install_exe), prev_dir=str(prev_dir or ""),
+                   installed_tag=row["latest_tag"], prev_tag=row["installed_tag"] or "",
+                   )
+    conn.commit()
+    progress(f"installed {row['repo']} {row['latest_tag']} ({mode}) → {install_exe}")
+    return f"{row['repo']} {row['latest_tag']} installed ({mode}): {install_exe}"
+
+
+def _install_managed(conn, row, stage, exe, progress) -> str:
+    dest = installs_dir() / row["repo"] / row["latest_tag"]
+    prev = installs_dir() / row["repo"] / row["installed_tag"] \
+        if row["installed_tag"] else None
+    shutil.rmtree(dest, ignore_errors=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(stage), str(dest))
+    rel = exe.relative_to(stage)
+    target = dest / rel
+    if not target.is_symlink():
+        target.chmod(target.stat().st_mode | 0o755)
+    link = user_bin_dir() / slug(row["repo"])
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(target)
+    progress(f"symlinked {link} → {target}")
+    return _finalize(conn, row, "managed", dest, link,
+                     prev if prev and prev.is_dir() else "", progress)
+
+
+def _install_inplace(conn, row, stage, exe, existing: Path, progress) -> str:
+    """Replace the binary we manage in place (AppImage-style single file)."""
+    if existing.is_symlink():
+        # symlink into ~/.local/bin: repoint it at a new managed dir instead
+        return _install_managed(conn, row, stage, exe, progress)
+    backup = existing.with_suffix(existing.suffix + ".codehound-bak")
+    shutil.copy2(existing, backup)
+    try:
+        if not exe.is_symlink() and exe.stat().st_mode & 0o111 == 0:
+            exe.chmod(exe.stat().st_mode | 0o755)
+        shutil.move(str(exe), str(existing))
+    except OSError as e:
+        raise SyncError(f"in-place replace failed: {e}") from e
+    shutil.rmtree(stage, ignore_errors=True)
+    progress(f"previous binary kept at {backup.name}")
+    return _finalize(conn, row, "inplace", existing.parent, existing, "", progress)
+
+
+def _install_custom(conn, row, stage, exe, custom: Path, progress) -> str:
+    """Install to the user's chosen location (a directory or a file path)."""
+    if custom.is_dir():
+        target = custom / exe.name
+    else:
+        target = custom
+        target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        backup = target.with_name(target.name + ".codehound-bak")
+        shutil.copy2(target, backup)
+        progress(f"previous binary kept at {backup.name}")
+    shutil.move(str(exe), str(target))
+    if not target.is_symlink():
+        target.chmod(target.stat().st_mode | 0o755)
+    shutil.rmtree(stage, ignore_errors=True)
+    return _finalize(conn, row, "custom", target.parent, target, "", progress)
+
+
+def rollback_update(conn: sqlite3.Connection, repo: str, progress=print) -> str:
+    """Put the previously installed version back."""
+    row = db.get_update(conn, repo)
+    if row is None:
+        raise SyncError(f"{repo} is not on the watch list")
+    mode = row["install_mode"] or ""
+    if mode == "managed":
+        prev = Path(row["prev_dir"] or "")
+        if not prev.is_dir():
+            raise SyncError(f"{repo}: no previous managed install to roll back to")
+        link = Path(row["install_exe"] or (user_bin_dir() / slug(repo)))
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        exe = find_executable(prev, slug(repo)) or next(
+            (p for p in prev.rglob("*") if p.is_file() and os.access(p, os.X_OK)), None)
+        if exe is None:
+            raise SyncError(f"{repo}: previous install has no executable")
+        link.symlink_to(exe)
+        db.set_install(conn, repo, mode="managed", install_dir=str(prev),
+                       install_exe=str(link), prev_dir="",
+                       installed_tag=row["prev_tag"] or "", prev_tag="")
+        conn.commit()
+        progress(f"rolled back {repo} to {row['prev_tag']}")
+        return f"{repo} rolled back to {row['prev_tag']}: {link}"
+    if mode in ("inplace", "custom"):
+        target = Path(row["install_exe"] or "")
+        backup = target.with_name(target.name + ".codehound-bak")
+        if not target.is_file() or not backup.is_file():
+            raise SyncError(f"{repo}: no backup binary to roll back to")
+        shutil.move(str(backup), str(target))
+        db.set_install(conn, repo, mode=mode, install_dir=str(target.parent),
+                       install_exe=str(target), prev_dir="",
+                       installed_tag=row["prev_tag"] or "", prev_tag="")
+        conn.commit()
+        progress(f"rolled back {repo} to {row['prev_tag']}")
+        return f"{repo} rolled back to {row['prev_tag']}: {target}"
+    raise SyncError(f"{repo}: nothing installed by codeHOUND to roll back")
 
 
 def check_updates(cfg, conn: sqlite3.Connection, progress=print) -> list[sqlite3.Row]:

@@ -239,5 +239,257 @@ class CheckUpdatesTests(unittest.TestCase):
                          "no published releases")
 
 
+# ---------------------------------------------------------------- phase 2
+
+import hashlib
+import os
+import tarfile
+import zipfile
+
+from codehound.updates import (
+    extract_archive,
+    find_executable,
+    install_update,
+    published_sha256,
+    rollback_update,
+    sha256_of,
+    slug,
+)
+
+
+def _make_exec(path: Path, content: bytes = b"#!/bin/sh\necho hi\n"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    path.chmod(0o755)
+    return path
+
+
+class ExtractTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_targz(self):
+        src = self.root / "build"
+        _make_exec(src / "appX-1.0" / "appX")
+        (src / "appX-1.0" / "README").write_text("hi")
+        arc = self.root / "appX.tar.gz"
+        with tarfile.open(arc, "w:gz") as tf:
+            tf.add(src / "appX-1.0", arcname="appX-1.0")
+        out = self.root / "out"
+        extract_archive(arc, out)
+        self.assertTrue(os.access(out / "appX-1.0" / "appX", os.X_OK))
+
+    def test_zip_preserves_exec_bit(self):
+        arc = self.root / "appX.zip"
+        with zipfile.ZipFile(arc, "w") as zf:
+            info = zipfile.ZipInfo("appX")
+            info.external_attr = 0o755 << 16
+            zf.writestr(info, "#!/bin/sh\n")
+        out = self.root / "out"
+        extract_archive(arc, out)
+        self.assertTrue(os.access(out / "appX", os.X_OK))
+
+    def test_zip_rejects_path_escape(self):
+        arc = self.root / "evil.zip"
+        with zipfile.ZipFile(arc, "w") as zf:
+            zf.writestr("../escaped", "x")
+        with self.assertRaises(Exception):
+            extract_archive(arc, self.root / "out")
+
+    def test_appimage_copied_executable(self):
+        arc = self.root / "appX.AppImage"
+        arc.write_bytes(b"ELF-ish")
+        out = self.root / "out"
+        extract_archive(arc, out)
+        got = out / "appX.AppImage"
+        self.assertTrue(got.is_file() and os.access(got, os.X_OK))
+
+
+class FindExecutableTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_exact_name_match(self):
+        _make_exec(self.root / "appX-1.0" / "appX")
+        _make_exec(self.root / "appX-1.0" / "helper")
+        self.assertEqual(find_executable(self.root, "appX").name, "appX")
+
+    def test_single_top_level(self):
+        _make_exec(self.root / "weirdname")
+        self.assertEqual(find_executable(self.root, "appX").name, "weirdname")
+
+    def test_apprun(self):
+        _make_exec(self.root / "squashfs-root" / "AppRun")
+        _make_exec(self.root / "squashfs-root" / "usr" / "lib")
+        self.assertEqual(find_executable(self.root, "appX").name, "AppRun")
+
+    def test_ambiguous_returns_none(self):
+        _make_exec(self.root / "a" / "one")
+        _make_exec(self.root / "b" / "two")
+        self.assertIsNone(find_executable(self.root, "zzz"))
+
+
+class ChecksumTests(unittest.TestCase):
+    def test_body_hash_found(self):
+        h = "ab" * 32
+        release = {"assets": [], "body": f"notes\n{h}  appX.AppImage\n"}
+        self.assertEqual(published_sha256(release, "appX.AppImage"), h)
+
+    def test_no_hash_returns_empty(self):
+        self.assertEqual(published_sha256({"assets": [], "body": ""}, "x"), "")
+
+    def test_sha256_of(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "f"
+            p.write_bytes(b"hello")
+            self.assertEqual(sha256_of(p), hashlib.sha256(b"hello").hexdigest())
+
+
+class InstallTests(unittest.TestCase):
+    """End-to-end install/rollback with the network download patched out."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+        def _user_bin():
+            d = self.root / "bin"
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+
+        for target, value in (
+            ("codehound.db.DB_PATH", self.root / "cat.db"),
+            ("codehound.updates.DATA_DIR", self.root / "data"),
+            ("codehound.updates.user_bin_dir", _user_bin),
+        ):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.conn = db.connect()
+        self.addCleanup(self.conn.close)
+        # a release row ready to install (as check_updates would leave it)
+        db.upsert_update(self.conn, {
+            "repo": "zacpr/appX", "path": "/r/appX", "name": "appX",
+            "current_tag": "v1.0.0", "latest_tag": "v1.1.0",
+            "published_at": None, "asset_name": "appX-v1.1.0.tar.gz",
+            "asset_url": "https://x/appX.tar.gz", "available": 1, "compatible": 1,
+            "reason": "", "last_checked": db.now()})
+        self.conn.commit()
+        # build the archive the "download" will produce
+        src = self.root / "build" / "appX-1.1.0"
+        _make_exec(src / "appX", b"#!/bin/sh\necho v1.1.0\n")
+        self.archive = self.root / "appX.tar.gz"
+        with tarfile.open(self.archive, "w:gz") as tf:
+            tf.add(src, arcname="appX-1.1.0")
+
+        def fake_download(url, dest, headers=None):
+            import shutil as sh
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            sh.copy2(self.archive, dest)
+            return dest
+        patcher = patch("codehound.updates.download_asset", side_effect=fake_download)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch("codehound.updates._release_by_tag",
+                        return_value={"assets": [], "body": ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.noop = lambda m: None
+
+    def _row(self):
+        return db.get_update(self.conn, "zacpr/appX")
+
+    def test_managed_install_and_symlink(self):
+        summary = install_update(_Cfg(), self.conn, "zacpr/appX", progress=self.noop)
+        row = self._row()
+        self.assertEqual(row["install_mode"], "managed")
+        self.assertEqual(row["installed_tag"], "v1.1.0")
+        link = self.root / "bin" / "appx"
+        self.assertTrue(link.is_symlink())
+        self.assertIn("v1.1.0", str(link.resolve()))
+        self.assertIn("installed", summary)
+        self.assertEqual(row["available"], 0)
+
+    def test_second_install_keeps_prev_for_rollback(self):
+        install_update(_Cfg(), self.conn, "zacpr/appX", progress=self.noop)
+        # bump to v1.2.0 and install again
+        _make_exec(self.root / "build2" / "appX", b"#!/bin/sh\necho v1.2.0\n")
+        with tarfile.open(self.archive, "w:gz") as tf:
+            tf.add(self.root / "build2" / "appX", arcname="appX")
+        self.conn.execute("UPDATE updates SET latest_tag='v1.2.0', available=1 "
+                          "WHERE repo='zacpr/appX'")
+        self.conn.commit()
+        install_update(_Cfg(), self.conn, "zacpr/appX", progress=self.noop)
+        row = self._row()
+        self.assertEqual(row["installed_tag"], "v1.2.0")
+        self.assertEqual(row["prev_tag"], "v1.1.0")
+        self.assertTrue(Path(row["prev_dir"]).is_dir())
+        # rollback repoints the symlink at the old version
+        rollback_update(self.conn, "zacpr/appX", progress=self.noop)
+        row = self._row()
+        self.assertEqual(row["installed_tag"], "v1.1.0")
+        self.assertIn("v1.1.0", str((self.root / "bin" / "appx").resolve()))
+
+    def test_inplace_replace_with_backup(self):
+        existing = self.root / "appX"
+        _make_exec(existing, b"old binary")
+        self.conn.execute("UPDATE updates SET install_exe=? WHERE repo='zacpr/appX'",
+                          (str(existing),))
+        self.conn.commit()
+        install_update(_Cfg(), self.conn, "zacpr/appX", progress=self.noop)
+        row = self._row()
+        self.assertEqual(row["install_mode"], "inplace")
+        self.assertEqual(existing.read_bytes(), b"#!/bin/sh\necho v1.1.0\n")
+        backup = existing.with_suffix(".codehound-bak")
+        self.assertTrue(backup.is_file())
+        # rollback restores the original bytes
+        rollback_update(self.conn, "zacpr/appX", progress=self.noop)
+        self.assertEqual(existing.read_bytes(), b"old binary")
+
+    def test_custom_path_override(self):
+        custom = self.root / "opt" / "appdir"
+        custom.mkdir(parents=True)
+        db.set_update_install_path(self.conn, "zacpr/appX", str(custom))
+        self.conn.commit()
+        install_update(_Cfg(), self.conn, "zacpr/appX", progress=self.noop)
+        row = self._row()
+        self.assertEqual(row["install_mode"], "custom")
+        self.assertTrue((custom / "appX").is_file())
+
+    def test_sha_mismatch_refuses_install(self):
+        good = sha256_of(self.archive)
+        with patch("codehound.updates._release_by_tag",
+                   return_value={"assets": [], "body": f"dead{good[4:]}  appX-v1.1.0.tar.gz"}):
+            with self.assertRaises(Exception) as ctx:
+                install_update(_Cfg(), self.conn, "zacpr/appX", progress=self.noop)
+        self.assertIn("SHA-256 mismatch", str(ctx.exception))
+        self.assertEqual(self._row()["available"], 1)   # row untouched
+
+    def test_sha_match_installs(self):
+        good = sha256_of(self.archive)
+        with patch("codehound.updates._release_by_tag",
+                   return_value={"assets": [], "body": f"{good}  appX-v1.1.0.tar.gz"}):
+            install_update(_Cfg(), self.conn, "zacpr/appX", progress=self.noop)
+        self.assertEqual(self._row()["install_mode"], "managed")
+
+    def test_not_on_watch_list(self):
+        from codehound.providers.base import SyncError
+        with self.assertRaises(SyncError):
+            install_update(_Cfg(), self.conn, "zacpr/nope", progress=self.noop)
+
+    def test_unsupported_asset_format(self):
+        from codehound.providers.base import SyncError
+        self.conn.execute("UPDATE updates SET asset_name='appX.msi', "
+                          "asset_url='https://x/appX.msi' WHERE repo='zacpr/appX'")
+        self.conn.commit()
+        with self.assertRaises(SyncError):
+            install_update(_Cfg(), self.conn, "zacpr/appX", progress=self.noop)
+
+
 if __name__ == "__main__":
     unittest.main()
