@@ -207,6 +207,38 @@ def _is_authed(cfg) -> bool:
     return any(getattr(a, "token", "") for a in cfg.accounts.get("github", []))
 
 
+def github_login(cfg) -> str:
+    """Login of the authenticated GitHub identity ('' when unauthenticated)."""
+    try:
+        me = _api_get(cfg, "user")
+    except SyncError:
+        return ""
+    return (me.get("login") or "") if isinstance(me, dict) else ""
+
+
+def _watchable_own_only(cfg, targets: list[WatchTarget], login: str,
+                        progress) -> list[WatchTarget]:
+    """Keep only repos the authed user owns themselves — not orgs, not forks.
+
+    The fork flag needs one API call per owned repo; a repo we can't inspect
+    stays on the list (its release check reports the error anyway)."""
+    keep: list[WatchTarget] = []
+    for t in targets:
+        owner = t.repo.split("/", 1)[0]
+        if owner.lower() != login.lower():
+            continue
+        try:
+            info = _api_get(cfg, f"repos/{t.repo}")
+        except SyncError:
+            keep.append(t)
+            continue
+        if isinstance(info, dict) and info.get("fork"):
+            progress(f"  {t.repo}: skipped — forked, not your own repo")
+            continue
+        keep.append(t)
+    return keep
+
+
 def _gh_token() -> str:
     """Token from a logged-in gh CLI; '' when gh is missing or logged out."""
     if shutil.which("gh") is None:
@@ -515,7 +547,8 @@ def install_update(cfg, conn: sqlite3.Connection, repo: str, progress=print,
     row = _check_installable(conn, repo)
     _drop_staged(conn, row, progress)   # a fresh download supersedes any staged copy
     stage, exe = _fetch_verify_extract(cfg, row, progress, exe_name)
-    return _activate(conn, row, stage, exe, progress)
+    return _activate(conn, row, stage, exe, progress,
+                     default_path=getattr(cfg, "updates_install_dir", ""))
 
 
 def _check_installable(conn: sqlite3.Connection, repo: str) -> sqlite3.Row:
@@ -594,14 +627,21 @@ def _fetch_verify_extract(cfg, row: sqlite3.Row, progress,
 
 
 def _activate(conn: sqlite3.Connection, row: sqlite3.Row, stage: Path,
-              exe: Path, progress) -> str:
-    """Move an unpacked + verified release into place (the install ladder)."""
+              exe: Path, progress, default_path: str = "") -> str:
+    """Move an unpacked + verified release into place (the install ladder).
+
+    Ladder: per-app `install_path` > replace an existing managed binary in
+    place > the global default install dir > managed dir with a ~/.local/bin
+    link."""
     custom = (row["install_path"] or "").strip()
     if custom:
         return _install_custom(conn, row, stage, exe, Path(custom), progress)
     existing = _existing_target(row)
     if existing is not None:
         return _install_inplace(conn, row, stage, exe, existing, progress)
+    if (default_path or "").strip():
+        return _install_custom(conn, row, stage, exe, Path(default_path.strip()),
+                               progress)
     return _install_managed(conn, row, stage, exe, progress)
 
 
@@ -635,7 +675,8 @@ def stage_update(cfg, conn: sqlite3.Connection, repo: str, progress=print) -> st
     return f"{row['repo']} {row['latest_tag']} staged (verified, not installed)"
 
 
-def activate_staged(conn: sqlite3.Connection, repo: str, progress=print) -> str:
+def activate_staged(conn: sqlite3.Connection, repo: str, progress=print,
+                    default_path: str = "") -> str:
     """Install a release that was staged earlier."""
     row = db.get_update(conn, repo)
     if row is None:
@@ -991,6 +1032,17 @@ def check_updates(cfg, conn: sqlite3.Connection, progress=print) -> list[sqlite3
     targets = watch_targets(conn)
     if not targets:
         progress("no catalogued projects with a GitHub remote — nothing to watch")
+    if getattr(cfg, "updates_own_only", True) and targets:
+        login = github_login(cfg)
+        if login:
+            targets = _watchable_own_only(cfg, targets, login, progress)
+            if not targets:
+                progress(f"nothing watched — with own_only on, only repos "
+                         f"'{login}' owns yourself count")
+        else:
+            progress("updates: own_only is on but GitHub isn't authenticated — "
+                     "watching every catalogued repo (add a token in "
+                     "Settings → Accounts or log in with gh)")
     mine = self_repo(cfg)
     for t in targets:
         if t.repo == mine:
