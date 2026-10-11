@@ -83,7 +83,9 @@ codehound updates           # list known updates for watched GitHub repos
 codehound updates --check   # refresh from the GitHub API first, then list
 codehound updates --activate # install everything staged (downloaded + verified)
 codehound update REPO       # download + install the newest release of REPO
+codehound update REPO --system     # install an RPM/DEB system-wide via pkexec
 codehound update REPO --rollback   # put the previous version back
+codehound self-update       # update codeHOUND itself, then relaunch on the new build
 ```
 
 ## The dashboard
@@ -163,9 +165,10 @@ can also edit by hand (created with defaults on first run):
   `model` / `base_url` (blank = provider default), `api_key` (blank = env var:
   `OPENAI_API_KEY`, `GEMINI_API_KEY`, `MOONSHOT_API_KEY`), and `catalogue_summary`
   (see below)
-- `[updates]` — `enabled` (watch GitHub releases of catalogued projects) and
+- `[updates]` — `enabled` (watch GitHub releases of catalogued projects),
   `mode` (`stage` = download + verify, wait for your click; `silent` = install
-  automatically after each check)
+  automatically after each check) and `self_repo` (the repo codeHOUND
+  self-updates from; blank turns self-updating off)
 
 ## Catalogue summaries
 
@@ -218,8 +221,11 @@ asset or a hash in the release notes), and installs it:
   with a symlink in `~/.local/bin` (make sure it is on your PATH).
 
 `codehound update REPO --rollback` puts the previous version back. AppImage, zip and
-tar archives install user-land; RPM and DEB payloads are unpacked without root (a
-system package install via pkexec is planned).
+tar archives install user-land. For a distribution package instead,
+`codehound update REPO --system` downloads and checksum-verifies the RPM/DEB and hands
+it to your package manager through `pkexec` (dnf/yum/apt/dpkg/rpm, whichever is
+present) — the package manager owns the files afterwards, so undo it with
+`dnf downgrade` / `apt install` rather than `--rollback`.
 
 **Automatic updates (stage-then-confirm)**: after each check, every compatible update
 gets an auto policy applied — per-repo `codehound updates --auto OWNER/REPO --mode
@@ -231,6 +237,16 @@ installed — the tray notification turns click-to-install, and
 staged. Staging is idempotent, and a staged release that a newer check supersedes is
 refused as stale rather than installed. `codehound updates --check --no-auto` skips
 the policy pass entirely.
+
+**Updating codeHOUND itself**: codeHOUND keeps itself on the watch list via
+`[updates] self_repo` (default `zacpr/codeHOUND`, blank turns it off), comparing
+releases against the **installed** version rather than a checkout's tag.
+`codehound self-update` (or the tray's **Update codeHOUND…**) installs its own
+RPM/DEB system-wide via pkexec — the running app keeps its old files until it
+exits, so the dashboard then quits and a detached helper restarts it on the new
+build. Releases in other formats can't replace a running install, so they stage
+for a manual swap instead. The automatic policy pass never touches the self row:
+self-update is always an explicit action.
 
 - Private repos and heavy polling need authentication: set a GitHub `token` in
   Settings → Accounts, or log in with the **gh** CLI — anonymous API access is limited
