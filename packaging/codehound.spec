@@ -1,5 +1,5 @@
 Name:           codehound
-Version:        0.5.0.3
+Version:        0.5.1.0
 Release:        1%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
@@ -79,6 +79,20 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Mon Oct 12 2026 zacpr <zac@ashurtech.net> - 0.5.1.0-1
+- Dashboard: update visibility and one-click installs. New 'Release
+  Updated' column with glowing highlight for apps with a newer
+  release; Updates filter button; sidebar Install Updates button
+  (confirm, then install all); per-row Install Update and Update
+  Settings (custom install path, auto/prompt/never policy); clearer
+  tray notification; version shown in status bar and tray menu.
+- Updates watching now defaults to repos you own (forks excluded);
+  set [updates] own_only = false to watch every catalogued repo.
+- New [updates] install_dir default path; per-app path overrides.
+- CLI: 'codehound updates --install-all'.
+- Fix: saving Settings no longer resets [updates] config; 'codehound
+  update REPO' no longer crashes on the staged-activation path.
+
 * Sun Oct 11 2026 zacpr <zac@ashurtech.net> - 0.5.0.3-1
 - Fix: 'codehound update' could not download release assets from
   private GitHub repositories (HTTP 404). Assets are now fetched
