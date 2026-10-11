@@ -14,6 +14,13 @@ verified and unpacked to a staging dir (`stage_update`) and the user confirms
 (`activate_staged` — via `codehound update REPO`, `updates --activate`, or
 clicking the tray message). `mode = "silent"` or a per-repo `auto=1` installs
 straight away; `auto=0` skips the repo entirely.
+Phase 4: system package installs and self-update. `system_package_install`
+(`codehound update REPO --system`) hands a verified RPM/DEB to the distro
+package manager through pkexec, so the app lands system-wide instead of
+user-land. `self_update` (`codehound self-update`) keeps codeHOUND itself on
+the watch list via `[updates] self_repo`, installs its own RPM/DEB the same
+way, and `schedule_relaunch` detaches a helper that waits for the dashboard
+to exit and starts the new build.
 """
 from __future__ import annotations
 
@@ -25,6 +32,8 @@ import shlex
 import re
 import shutil
 import sqlite3
+import subprocess
+import sys
 import tarfile
 import zipfile
 from dataclasses import dataclass
@@ -32,7 +41,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from . import db
+from . import __version__, db
 from .config import DATA_DIR
 from .providers.base import SyncError, http_json, run
 from .safepath import safe_rmtree
@@ -208,8 +217,8 @@ def _latest_release(cfg, repo: str) -> dict | None:
 # ---------------------------------------------------------------- installation
 
 # Formats phase 2 can install without admin rights. rpm/deb payloads are
-# unpacked user-land (rpm2cpio/ar); installing them system-wide via pkexec is
-# a later phase.
+# unpacked user-land (rpm2cpio/ar); `system_package_install` installs them
+# system-wide via pkexec instead.
 _INSTALLABLE = (".appimage", ".zip", ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2",
                 ".tar.zst", ".rpm", ".deb")
 
@@ -473,11 +482,10 @@ def _stage_dir_for(row: sqlite3.Row) -> Path:
     return downloads_dir() / f"stage-{fname}"
 
 
-def _fetch_verify_extract(cfg, row: sqlite3.Row, progress,
-                          exe_name: str | None = None,
-                          keep_archive: bool = True) -> tuple[Path, Path]:
-    """Download the matched asset, verify its checksum, unpack it, and locate
-    the executable. Nothing installed is touched at this stage."""
+def _download_verify(cfg, row: sqlite3.Row, progress,
+                     keep_archive: bool = True) -> Path:
+    """Download the matched asset and verify its published SHA-256. Returns
+    the archive path; raises (and deletes the file) on a checksum mismatch."""
     fname = f"{row['repo'].replace('/', '__')}__{row['asset_name']}"
     archive = downloads_dir() / fname
     progress(f"downloading {row['asset_name']}…")
@@ -498,6 +506,15 @@ def _fetch_verify_extract(cfg, row: sqlite3.Row, progress,
     else:
         progress("no published checksum found"
                  + ("" if keep_archive else " — staged unverified"))
+    return archive
+
+
+def _fetch_verify_extract(cfg, row: sqlite3.Row, progress,
+                          exe_name: str | None = None,
+                          keep_archive: bool = True) -> tuple[Path, Path]:
+    """Download the matched asset, verify its checksum, unpack it, and locate
+    the executable. Nothing installed is touched at this stage."""
+    archive = _download_verify(cfg, row, progress, keep_archive)
 
     stage = _stage_dir_for(row)
     safe_rmtree(stage, data_roots(), "staging dir")
@@ -598,8 +615,14 @@ def apply_updates(cfg, conn: sqlite3.Connection, progress=print) -> tuple[list[s
     installed: list[str] = []
     staged: list[str] = []
     errors: list[str] = []
+    mine = self_repo(cfg)
     for row in db.available_updates(conn):
         if not row["compatible"] or not row["asset_name"].lower().endswith(_INSTALLABLE):
+            continue
+        if row["repo"] == mine:
+            # codeHOUND updating itself needs a quit-and-swap (the app is
+            # running); that's `codehound self-update`, not the silent policy pass.
+            progress(f"{row['repo']}: self-update runs with 'codehound self-update'")
             continue
         mode = effective_mode(row, cfg.updates_mode)
         if mode == "skip":
@@ -729,7 +752,151 @@ def rollback_update(conn: sqlite3.Connection, repo: str, progress=print) -> str:
         conn.commit()
         progress(f"rolled back {repo} to {row['prev_tag']}")
         return f"{repo} rolled back to {row['prev_tag']}: {target}"
+    if mode == "system":
+        raise SyncError(f"{repo}: installed by your package manager — roll back "
+                        "with it (dnf downgrade / apt install)")
     raise SyncError(f"{repo}: nothing installed by codeHOUND to roll back")
+
+
+# ------------------------------------------------------- system package installs
+
+# Package managers we can drive through pkexec, in preference order per format.
+_PACKAGE_INSTALLERS = {
+    ".rpm": [("dnf", "install", "-y"), ("yum", "install", "-y"),
+             ("rpm", "-U", "--replacepkgs")],
+    ".deb": [("apt-get", "install", "-y"), ("apt", "install", "-y"),
+             ("dnf", "install", "-y"), ("dpkg", "-i")],
+}
+
+
+def _package_installer(archive: Path) -> list[str]:
+    """The first installed command that can install this package format."""
+    for ext, cmds in _PACKAGE_INSTALLERS.items():
+        if archive.name.lower().endswith(ext):
+            for cmd in cmds:
+                if shutil.which(cmd[0]):
+                    return list(cmd)
+    raise SyncError(f"no package manager found for {archive.name} "
+                    "(tried dnf, yum, apt, dpkg, rpm)")
+
+
+def system_package_install(cfg, conn: sqlite3.Connection, repo: str,
+                           progress=print) -> str:
+    """Download + verify the matched RPM/DEB and install it system-wide via pkexec.
+
+    The distro package manager owns the files afterwards, so `--rollback`
+    defers to it (`dnf downgrade` / `apt install`) rather than to our
+    prev_dir bookkeeping. The archive is deleted once the install succeeds.
+    """
+    row = _check_installable(conn, repo)
+    if not row["asset_name"].lower().endswith((".rpm", ".deb")):
+        raise SyncError(f"{repo}: {row['asset_name']} is not an RPM or DEB — "
+                        "system installs need a distribution package")
+    if shutil.which("pkexec") is None:
+        raise SyncError("pkexec not found — system installs need a polkit agent")
+    _drop_staged(conn, row, progress)
+    archive = _download_verify(cfg, row, progress)
+    cmd = ["pkexec", *_package_installer(archive), str(archive)]
+    progress(f"installing system-wide: {' '.join(cmd)}")
+    try:
+        run(cmd, timeout=1800)
+    except SyncError as e:
+        raise SyncError(f"system install failed: {e}") from e
+    archive.unlink(missing_ok=True)
+    exe = Path("/usr/bin") / slug(repo)
+    return _finalize(conn, row, "system", Path("/usr/bin"), exe, "", progress)
+
+
+# ---------------------------------------------------------------- self-update
+
+def self_repo(cfg) -> str:
+    """The owner/repo codeHOUND self-updates from ('' = self-update off)."""
+    return (getattr(cfg, "self_repo", "") or "").strip()
+
+
+def check_self_update(cfg, conn: sqlite3.Connection,
+                      progress=print) -> sqlite3.Row | None:
+    """Refresh the watch row for codeHOUND's own release feed.
+
+    The row's `current_tag` is the *installed* version, not a clone's tag —
+    self-update cares about what is running, not what is checked out. Returns
+    the row, or None when self-update is off or the repo publishes nothing.
+    """
+    repo = self_repo(cfg)
+    if not repo:
+        return None
+    try:
+        release = _latest_release(cfg, repo)
+    except SyncError as e:
+        progress(f"  {repo}: self-update check failed — {e}")
+        return None
+    if release is None:
+        return None
+    tag = release.get("tag_name") or ""
+    asset, reason = pick_asset(release.get("assets", []))
+    is_new = newer(tag, __version__)
+    db.upsert_update(conn, {
+        "repo": repo, "path": "", "name": "codeHOUND",
+        "current_tag": __version__, "latest_tag": tag,
+        "published_at": release.get("published_at"),
+        "asset_name": (asset or {}).get("name"),
+        "asset_url": (asset or {}).get("browser_download_url"),
+        "available": 1 if is_new else 0,
+        "compatible": 1 if (is_new and asset) else 0,
+        "reason": "" if (is_new and asset) else (
+            "up to date" if not is_new else reason),
+        "last_checked": db.now()})
+    conn.commit()
+    return db.get_update(conn, repo)
+
+
+def self_update(cfg, conn: sqlite3.Connection, progress=print,
+                stage_only: bool = False) -> str:
+    """Update codeHOUND itself from its own GitHub releases.
+
+    RPM/DEB releases install system-wide through pkexec — the running process
+    keeps its old files until it exits, so the new build only starts after a
+    relaunch (`schedule_relaunch` arranges that for the dashboard). Other
+    formats can't replace a running install, so they stage for a manual swap.
+    """
+    repo = self_repo(cfg)
+    if not repo:
+        raise SyncError("self-update is off — set [updates] self_repo in config.toml")
+    row = db.get_update(conn, repo)
+    if row is None or not row["available"]:
+        row = check_self_update(cfg, conn, progress) or row
+    if row is None:
+        raise SyncError(f"{repo}: no published releases to update from")
+    if not row["available"]:
+        return f"codeHOUND {__version__} is already the newest release"
+    name = row["asset_name"].lower()
+    if stage_only or not name.endswith((".rpm", ".deb")):
+        if not name.endswith(_INSTALLABLE):
+            raise SyncError(f"{repo}: {row['asset_name']} cannot be installed "
+                            "automatically")
+        return stage_update(cfg, conn, repo, progress)
+    summary = system_package_install(cfg, conn, repo, progress)
+    return summary + " — restart codeHOUND to run the new version"
+
+
+def schedule_relaunch(when_pid: int | None = None,
+                      launch: list[str] | None = None, progress=print) -> str:
+    """Detach a helper that waits for `when_pid` to exit, then starts codeHOUND again.
+
+    Used after a system self-update so the dashboard can quit and come back
+    on the new build. The helper is a plain detached shell loop — it creates
+    and deletes no files, so it never touches safe_rmtree territory.
+    """
+    pid = when_pid or os.getpid()
+    cmd = launch or [sys.executable, "-m", "codehound.cli", "app"]
+    quoted = " ".join(shlex.quote(a) for a in cmd)
+    script = (f"while kill -0 {pid} 2>/dev/null; do sleep 0.5; done; "
+              f"exec {quoted}")
+    subprocess.Popen(["sh", "-c", script], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL)
+    progress(f"relaunch scheduled after pid {pid} exits: {quoted}")
+    return f"relaunch scheduled: {quoted}"
 
 
 def check_updates(cfg, conn: sqlite3.Connection, progress=print) -> list[sqlite3.Row]:
@@ -742,7 +909,10 @@ def check_updates(cfg, conn: sqlite3.Connection, progress=print) -> list[sqlite3
     targets = watch_targets(conn)
     if not targets:
         progress("no catalogued projects with a GitHub remote — nothing to watch")
+    mine = self_repo(cfg)
     for t in targets:
+        if t.repo == mine:
+            continue   # codeHOUND's own row is owned by check_self_update
         try:
             release = _latest_release(cfg, t.repo)
         except SyncError as e:

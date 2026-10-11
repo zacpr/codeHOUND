@@ -296,6 +296,9 @@ def cmd_updates(args) -> int:
                 return 0
             failed = 0
             for row in staged:
+                if row["repo"] == updates.self_repo(cfg):
+                    _say(f"{row['repo']}: self-update runs with 'codehound self-update'")
+                    continue
                 try:
                     _say(updates.activate_staged(conn, row["repo"], progress=_say))
                 except SyncError as e:
@@ -309,6 +312,9 @@ def cmd_updates(args) -> int:
             except SyncError as e:
                 _say(f"updates: {e}")
                 return 1
+            if updates.self_repo(cfg):
+                updates.check_self_update(cfg, conn, progress=_say)
+                available = db.available_updates(conn)
             if available and not args.no_auto:
                 installed, newly_staged, _errs = updates.apply_updates(
                     cfg, conn, progress=_say)
@@ -393,11 +399,18 @@ def cmd_update(args) -> int:
             return 0
         try:
             row = db.get_update(conn, repo)
+            if repo == updates.self_repo(cfg):
+                _say(f"{repo} is codeHOUND itself — use 'codehound self-update' "
+                     "(it quits and swaps the running app)")
+                return 1
             staged = (row["staged_dir"] or "") if row else ""
-            if staged and not args.exe and Path(staged).is_dir() \
+            if not args.system and staged and not args.exe \
+                    and Path(staged).is_dir() \
                     and row["staged_tag"] == row["latest_tag"]:
                 # already downloaded + verified — just move it into place
                 _say(updates.activate_staged(conn, repo, progress=_say))
+            elif args.system:
+                _say(updates.system_package_install(cfg, conn, repo, progress=_say))
             else:
                 _say(updates.install_update(cfg=load_config(), conn=conn, repo=repo,
                                             progress=_say, exe_name=args.exe))
@@ -405,6 +418,23 @@ def cmd_update(args) -> int:
             _say(f"update: {e}")
             return 1
         return 0
+    finally:
+        conn.close()
+
+
+def cmd_self_update(args) -> int:
+    from . import db, updates
+    from .providers.base import SyncError
+
+    cfg = load_config()
+    conn = db.connect()
+    try:
+        _say(updates.self_update(cfg, conn, progress=_say,
+                                 stage_only=args.stage))
+        return 0
+    except SyncError as e:
+        _say(f"self-update: {e}")
+        return 1
     finally:
         conn.close()
 
@@ -495,7 +525,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--exe", help="executable name inside the asset, when it can't be guessed")
     p.add_argument("--set-path", metavar="PATH",
                    help="install this repo here instead (blank clears the override)")
+    p.add_argument("--system", action="store_true",
+                   help="install an RPM/DEB system-wide via pkexec instead of user-land")
     p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser("self-update", help="update codeHOUND itself from its own releases")
+    p.add_argument("--stage", action="store_true",
+                   help="download + verify only, don't install")
+    p.set_defaults(func=cmd_self_update)
 
     p = sub.add_parser("install-timer", help="install + enable the systemd user scan timer")
     p.add_argument("--every", default="6h", help="scan interval (systemd time span, default 6h)")

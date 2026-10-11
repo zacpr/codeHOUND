@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -967,6 +968,39 @@ class Dashboard(QMainWindow):
         self._start_cli("_updates_proc", ["updates", "--check"],
                         self.updates_btn, "Checking…", "Check Updates")
 
+    def start_self_update(self):
+        """Update codeHOUND itself, then quit and come back on the new build."""
+        if self._updates_proc is not None:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Update codeHOUND")
+        box.setText("Update codeHOUND to its newest release?\n\n"
+                    "A system package install will ask for admin rights (pkexec). "
+                    "codeHOUND quits and restarts on the new version once the "
+                    "install finishes.")
+        box.setStandardButtons(QMessageBox.StandardButton.Yes
+                               | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        self._start_cli("_updates_proc", ["self-update"], self.updates_btn,
+                        "Updating…", "Check Updates")
+
+    def _relaunch_after_self_update(self):
+        """Hand the restart to a detached helper, then quit so it can run."""
+        from . import updates
+        try:
+            updates.schedule_relaunch(
+                when_pid=os.getpid(),
+                launch=[sys.executable, "-m", "codehound.cli", "app"],
+                progress=lambda m: self._task_output(m))
+        except OSError as e:
+            self._task_output(f"relaunch failed: {e} — start codeHOUND again manually")
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
     def new_project(self, default_tab: int = 0):
         dlg = NewProjectDialog(self.cfg, self, default_tab, self._selected_path())
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1001,6 +1035,8 @@ class Dashboard(QMainWindow):
             self.statusBar().showMessage(f"{what} exited with code {code} — see Activity")
         elif what == "updates":
             self._notify_updates()
+        elif what == "self-update":
+            self._relaunch_after_self_update()
 
     def _notify_updates(self):
         """Bubble a tray message when an update check found something new.
@@ -1218,6 +1254,8 @@ def run_app() -> int:
         ask_act.setToolTip("Configure an AI provider in Settings → AI first")
     if ai_ready and win.cfg.ai_catalogue_summary:
         menu.addAction("Refresh AI summary").triggered.connect(win.refresh_digest)
+    if (win.cfg.self_repo or "").strip():
+        menu.addAction("Update codeHOUND…").triggered.connect(win.start_self_update)
     menu.addAction("Settings…").triggered.connect(win.open_settings)
     menu.addSeparator()
     menu.addAction("Quit").triggered.connect(app.quit)

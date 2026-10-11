@@ -86,9 +86,12 @@ exclude = []            # repo names or full paths the janitor must never touch
 # mode = "stage"  download + verify automatically, activate on confirmation
 # mode = "silent" fully automatic install for opted-in repos, notify after
 # Per-repo override: codehound updates --auto <repo> (auto / never / default).
+# self_repo: codeHOUND keeps itself on the watch list and self-updates from it
+# (`codehound self-update`); set it blank to turn self-updating off.
 [updates]
 enabled = true
 mode = "stage"
+self_repo = "zacpr/codeHOUND"
 
 # Accounts mirrored by `codehound sync` (also editable in the app's Settings → Accounts).
 # Tokens are optional: GitHub falls back to the gh CLI login, Azure DevOps to az.
@@ -132,6 +135,7 @@ class Config:
     janitor_exclude: list[str] = field(default_factory=list)
     updates_enabled: bool = True
     updates_mode: str = "stage"   # "stage" = confirm before activating, "silent" = auto-install
+    self_repo: str = "zacpr/codeHOUND"  # owner/repo codeHOUND self-updates from (blank = off)
 
 
 def ensure_config() -> Path:
@@ -211,6 +215,7 @@ exclude = {_toml_list(cfg.janitor_exclude)}            # repo names or full path
 [updates]
 enabled = {str(cfg.updates_enabled).lower()}
 mode = {_toml_str(cfg.updates_mode)}   # "stage" = confirm before activating, "silent" = auto-install
+self_repo = {_toml_str(cfg.self_repo)}   # codeHOUND self-updates from this repo (blank = off)
 {accounts}
 """
     CONFIG_PATH.write_text(text)
@@ -258,4 +263,5 @@ def load_config() -> Config:
         janitor_exclude=list(janitor.get("exclude", [])),
         updates_enabled=updates.get("enabled", True),
         updates_mode=updates.get("mode", "stage"),
+        self_repo=updates.get("self_repo", "zacpr/codeHOUND"),
     )
