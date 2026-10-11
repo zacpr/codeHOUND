@@ -1,5 +1,5 @@
 Name:           codehound
-Version:        0.5.1.2
+Version:        0.5.1.3
 Release:        1%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
@@ -79,6 +79,12 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Mon Oct 12 2026 zacpr <zac@ashurtech.net> - 0.5.1.3-1
+- Updates: fixed 'codehound updates --install-all' crashing with
+  AttributeError ('Namespace' has no attribute 'exe') — --exe was only
+  defined on the 'update' subparser, so every install-all run died,
+  including the dashboard's Install Updates button.
+
 * Mon Oct 12 2026 zacpr <zac@ashurtech.net> - 0.5.1.2-1
 - Updates: codeHOUND's own row now lights up with the release badge. The
   self-update row was written with an empty path, and the dashboard keys
