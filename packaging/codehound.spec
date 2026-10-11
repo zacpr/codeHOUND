@@ -1,6 +1,6 @@
 Name:           codehound
-Version:        0.2.0
-Release:        10%{?dist}
+Version:        0.3.0
+Release:        1%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
 License:        MIT
@@ -79,6 +79,14 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Sun Oct 11 2026 zacpr <zac@ashurtech.net> - 0.3.0-1
+- New Project: one button to create a brand-new project (git init, optional
+  AI scaffold), clone an existing repo (URL, local path, or the catalogue),
+  or add a worktree for a branch of a project already on disk
+- Matching CLI: codehound new / clone / worktree
+- Right-click a project to jump straight to the worktree tab
+- Log per-directory progress while the LLM classifies ambiguous directories
+
 * Sat Sep 26 2026 zacpr <zac@ashurtech.net> - 0.2.0-10
 - Give Cody a distinct theme icon name so desktop shells cannot reuse the old icon cache
 
