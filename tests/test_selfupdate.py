@@ -237,6 +237,9 @@ class SelfUpdateTests(_Base):
                         return_value={"assets": [], "body": ""})
         patcher.start()
         self.addCleanup(patcher.stop)
+        patcher = patch("codehound.updates._gh_token", return_value="")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         patcher = patch("codehound.updates.run",
                         side_effect=AssertionError("must not run pkexec"))
         patcher.start()

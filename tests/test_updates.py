@@ -8,13 +8,20 @@ from unittest.mock import patch
 from codehound import db
 from codehound.updates import (
     WatchTarget,
+    _asset_href,
+    _asset_href_for,
+    _auth_headers,
+    _download_verify,
+    _gh_token,
     check_updates,
     local_tag,
     newer,
     parse_github_repo,
     pick_asset,
+    published_sha256,
     watch_targets,
 )
+from codehound.providers.base import SyncError
 
 
 def _asset(name, url=None):
@@ -331,6 +338,91 @@ class FindExecutableTests(unittest.TestCase):
         _make_exec(self.root / "a" / "one")
         _make_exec(self.root / "b" / "two")
         self.assertIsNone(find_executable(self.root, "zzz"))
+
+
+class PrivateAssetTests(unittest.TestCase):
+    """A private repo's browser_download_url 404s; assets must come from the
+    API asset endpoint with the same auth the API calls use."""
+
+    def test_href_prefers_api_url(self):
+        a = {"name": "x.rpm", "url": "https://api.github.com/releases/assets/1",
+             "browser_download_url": "https://github.com/x/y/releases/download/v1/x.rpm"}
+        self.assertEqual(_asset_href(a), "https://api.github.com/releases/assets/1")
+
+    def test_href_falls_back_to_browser_url(self):
+        a = {"name": "x.rpm", "browser_download_url": "https://github.com/x.rpm"}
+        self.assertEqual(_asset_href(a), "https://github.com/x.rpm")
+
+    def test_href_for_matches_by_name(self):
+        rel = {"assets": [{"name": "a.rpm", "url": "https://api/a"},
+                          {"name": "b.rpm", "url": "https://api/b"}]}
+        self.assertEqual(_asset_href_for(rel, "b.rpm"), "https://api/b")
+        self.assertEqual(_asset_href_for(rel, "missing.rpm"), "")
+        self.assertEqual(_asset_href_for(None, "a.rpm"), "")
+
+    def test_auth_ladder_pat_then_gh_then_anon(self):
+        class Pat:
+            token = "pat-token"
+        cfg = type("C", (), {"accounts": {"github": [Pat()]}})
+        self.assertEqual(_auth_headers(cfg), {"Authorization": "Bearer pat-token"})
+        no_pat = type("C", (), {"accounts": {"github": [type("A", (), {"token": ""})]}})
+        with patch("codehound.updates._gh_token", return_value="gh-token"):
+            self.assertEqual(_auth_headers(no_pat), {"Authorization": "Bearer gh-token"})
+        with patch("codehound.updates._gh_token", return_value=""):
+            self.assertEqual(_auth_headers(no_pat), {})
+
+    def test_gh_token_swallows_failures(self):
+        with patch("codehound.updates.shutil.which", return_value="/usr/bin/gh"), \
+             patch("codehound.updates.run", side_effect=SyncError("nope")):
+            self.assertEqual(_gh_token(), "")
+        with patch("codehound.updates.shutil.which", return_value=None):
+            self.assertEqual(_gh_token(), "")
+
+    def test_download_uses_api_href_and_auth(self):
+        """The row's browser URL is not trusted when the release has an API href."""
+        seen = {}
+
+        def fake_download(url, dest, headers=None):
+            seen["url"] = url
+            seen["headers"] = headers or {}
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"payload")
+            return dest
+        release = {"assets": [{"name": "appX.rpm", "url": "https://api/assets/9",
+                               "browser_download_url": "https://github.com/x/appX.rpm"}],
+                   "body": ""}
+        with patch("codehound.updates.download_asset", side_effect=fake_download), \
+             patch("codehound.updates._release_by_tag", return_value=release), \
+             patch("codehound.updates._auth_headers", return_value={"Authorization": "Bearer t"}), \
+             patch("codehound.updates.downloads_dir", return_value=Path(tempfile.mkdtemp())):
+            row = {"repo": "zacpr/appX", "asset_name": "appX.rpm",
+                   "asset_url": "https://github.com/x/appX.rpm", "latest_tag": "v1"}
+            _download_verify(type("C", (), {"accounts": {}}), row, lambda m: None)
+        self.assertEqual(seen["url"], "https://api/assets/9")
+        self.assertEqual(seen["headers"].get("Authorization"), "Bearer t")
+
+    def test_checksum_fetch_uses_api_href(self):
+        sums = "ab" * 32 + "  appX.rpm\n"
+        captured = {}
+
+        class Resp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return sums.encode()
+
+        def fake_urlopen(req, timeout=60):
+            captured["url"] = req.full_url
+            captured["auth"] = req.get_header("Authorization")
+            return Resp()
+        release = {"assets": [{"name": "SHA256SUMS.txt",
+                               "url": "https://api/assets/7",
+                               "browser_download_url": "https://github.com/x/SHA256SUMS.txt"}],
+                   "body": ""}
+        with patch("codehound.updates.urlopen", side_effect=fake_urlopen):
+            got = published_sha256(release, "appX.rpm", {"Authorization": "Bearer t"})
+        self.assertEqual(got, "ab" * 32)
+        self.assertEqual(captured["url"], "https://api/assets/7")
+        self.assertEqual(captured["auth"], "Bearer t")
 
 
 class ChecksumTests(unittest.TestCase):

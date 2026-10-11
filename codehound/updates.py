@@ -207,6 +207,46 @@ def _is_authed(cfg) -> bool:
     return any(getattr(a, "token", "") for a in cfg.accounts.get("github", []))
 
 
+def _gh_token() -> str:
+    """Token from a logged-in gh CLI; '' when gh is missing or logged out."""
+    if shutil.which("gh") is None:
+        return ""
+    try:
+        return run(["gh", "auth", "token"], timeout=10).strip()
+    except SyncError:
+        return ""
+
+
+def _auth_headers(cfg) -> dict:
+    """Auth headers for asset downloads — same ladder as `_api_get`:
+    configured PAT first, then gh CLI login, then anonymous."""
+    for account in cfg.accounts.get("github", []):
+        token = getattr(account, "token", "")
+        if token:
+            return {"Authorization": f"Bearer {token}"}
+    token = _gh_token()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _asset_href(asset: dict) -> str:
+    """The URL to actually fetch one asset from.
+
+    A private repo's `browser_download_url` 404s even when a token is sent —
+    GitHub only serves it to a logged-in web session. The API asset endpoint
+    (its `url`, fetched with Accept: application/octet-stream) is the
+    authenticated path, and it works for public repos too.
+    """
+    return asset.get("url") or asset.get("browser_download_url") or ""
+
+
+def _asset_href_for(release: dict | None, asset_name: str) -> str:
+    """`_asset_href` for the release asset with this exact name, '' if absent."""
+    for a in (release or {}).get("assets", []):
+        if (a.get("name") or "") == asset_name:
+            return _asset_href(a)
+    return ""
+
+
 def _latest_release(cfg, repo: str) -> dict | None:
     """Newest non-draft, non-prerelease release, or None if the repo has none."""
     releases = _api_get(cfg, f"repos/{repo}/releases?per_page=10")
@@ -275,8 +315,15 @@ def slug(repo: str) -> str:
 
 
 def download_asset(url: str, dest: Path, headers: dict | None = None) -> Path:
-    """Stream a release asset to disk (GitHub redirects to the CDN)."""
-    req = Request(url, headers={"User-Agent": "codehound", **(headers or {})})
+    """Stream a release asset to disk (GitHub redirects to the CDN).
+
+    The Accept header matters when `url` is the API asset endpoint — without
+    `application/octet-stream` GitHub answers with asset JSON instead of the
+    file. Harmless on the browser download URL, which redirects to the CDN.
+    """
+    req = Request(url, headers={"User-Agent": "codehound",
+                                "Accept": "application/octet-stream",
+                                **(headers or {})})
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     try:
@@ -297,15 +344,19 @@ def sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def published_sha256(release: dict, asset_name: str) -> str:
+def published_sha256(release: dict, asset_name: str,
+                     headers: dict | None = None) -> str:
     """Expected SHA-256 for an asset, from a SHA256SUMS asset or the release
     body; '' when the publisher did not provide one."""
     for a in release.get("assets", []):
         name = (a.get("name") or "").lower()
-        if name.startswith("sha256sums") and name.endswith((".txt", ".asc", "")):
+        href = _asset_href(a)
+        if name.startswith("sha256sums") and name.endswith((".txt", ".asc", "")) and href:
             try:
-                req = Request(a["browser_download_url"],
-                              headers={"User-Agent": "codehound"})
+                req = Request(href,
+                              headers={"User-Agent": "codehound",
+                                       "Accept": "application/octet-stream",
+                                       **(headers or {})})
                 with urlopen(req, timeout=60) as resp:
                     text = resp.read().decode("utf-8", "replace")
             except (OSError, ValueError, KeyError):
@@ -491,12 +542,19 @@ def _download_verify(cfg, row: sqlite3.Row, progress,
     the archive path; raises (and deletes the file) on a checksum mismatch."""
     fname = f"{row['repo'].replace('/', '__')}__{row['asset_name']}"
     archive = downloads_dir() / fname
-    progress(f"downloading {row['asset_name']}…")
-    download_asset(row["asset_url"], archive)
-    # fetch the release again by tag to look for a published SHA-256
+    # the release by tag gives us the API asset href (private repos 404 on the
+    # browser URL) and any published SHA-256; if that lookup fails we can still
+    # try the browser URL for a public repo, just without a checksum
     try:
         release = _release_by_tag(cfg, row["repo"], row["latest_tag"])
-        expected = published_sha256(release, row["asset_name"]) if release else ""
+    except SyncError:
+        release = None
+    href = _asset_href_for(release, row["asset_name"]) or row["asset_url"]
+    headers = _auth_headers(cfg)
+    progress(f"downloading {row['asset_name']}…")
+    download_asset(href, archive, headers)
+    try:
+        expected = published_sha256(release, row["asset_name"], headers) if release else ""
     except SyncError:
         expected = ""
     actual = sha256_of(archive)
