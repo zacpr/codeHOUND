@@ -1,5 +1,5 @@
 Name:           codehound
-Version:        0.5.0.2
+Version:        0.5.0.3
 Release:        1%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
@@ -79,6 +79,12 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Sun Oct 11 2026 zacpr <zac@ashurtech.net> - 0.5.0.3-1
+- Fix: 'codehound update' could not download release assets from
+  private GitHub repositories (HTTP 404). Assets are now fetched
+  through the authenticated releases API with the same credentials
+  used for release listing.
+
 * Sun Oct 11 2026 zacpr <zac@ashurtech.net> - 0.5.0.2-1
 - Fix: an RPM upgrade left the per-user systemd units behind, so the
   scan timer kept running the old command line (no 'updates --check').
