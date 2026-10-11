@@ -1,5 +1,5 @@
 Name:           codehound
-Version:        0.5.1.1
+Version:        0.5.1.2
 Release:        1%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
@@ -79,6 +79,16 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Mon Oct 12 2026 zacpr <zac@ashurtech.net> - 0.5.1.2-1
+- Updates: codeHOUND's own row now lights up with the release badge. The
+  self-update row was written with an empty path, and the dashboard keys
+  updates by project path, so our clone could never show it; the row now
+  carries the path of the catalogued clone.
+- Self row stays out of the bulk 'Install Updates' count and never opens
+  'Update Settings…'; its context-menu 'Install Update' runs the
+  self-update flow (quits and restarts on the new build) instead of the
+  per-app installer, which refuses our own repo.
+
 * Mon Oct 12 2026 zacpr <zac@ashurtech.net> - 0.5.1.1-1
 - Updates: repos no longer on the watch list (un-catalogued, forked,
   transferred, or filtered out by own-only) are pruned from the
