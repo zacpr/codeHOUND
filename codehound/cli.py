@@ -20,11 +20,30 @@ def cmd_scan(args) -> int:
 
     if cfg.ollama_enabled and cfg.ollama_classify and result.candidates:
         if ollama.server_up(cfg) and (ollama.model_available(cfg) or ollama.pull_model(cfg, _say)):
-            _say(f"classifying {len(result.candidates)} ambiguous dirs…")
+            total = len(result.candidates)
+            _say(f"classifying {total} ambiguous dirs with {cfg.ollama_model} at {cfg.ollama_url}…")
             conn = db.connect()
             import os
-            for path in result.candidates:
-                if ollama.classify(cfg, path):
+            import time
+            found = skipped = undecided = 0
+            for i, path in enumerate(result.candidates, 1):
+                _say(f"[{i}/{total}] {path} is unclassified, asking {cfg.ollama_model} to analyse it…")
+                started = time.monotonic()
+                verdict, note = ollama.classify_detail(cfg, path)
+                took = f"{time.monotonic() - started:.1f}s"
+                if verdict is None:
+                    undecided += 1
+                    _say(f"  → no verdict ({note}, {took}), moving on")
+                elif verdict:
+                    found += 1
+                    _say(f"  → classified as a software project ({took}), adding to catalogue")
+                else:
+                    skipped += 1
+                    _say(f"  → classified as not a coding project ({took}), moving on")
+                remaining = total - i
+                if remaining:
+                    _say(f"  {remaining} ambiguous dirs remain, next: {result.candidates[i]}")
+                if verdict:
                     proj = {
                         "path": path, "kind": "ungitted",
                         "name": os.path.basename(path.rstrip("/")),
@@ -34,10 +53,12 @@ def cmd_scan(args) -> int:
                         "dirty": 0, "created": None, "modified": None, "size_approx": None,
                     }
                     db.upsert_project(conn, proj)
-                    if args.verbose:
-                        _say(f"  [llm] {path}")
-            conn.commit()
+                    conn.commit()
             conn.close()
+            _say(
+                f"classification done: {found} projects · {skipped} not projects · "
+                f"{undecided} undecided"
+            )
         else:
             _say("ollama unavailable — skipping classification")
 
