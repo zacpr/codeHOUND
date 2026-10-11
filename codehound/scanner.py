@@ -93,6 +93,12 @@ def _project_stats(path: str, exclude: set[str]) -> tuple[str | None, int]:
     return mtime, total
 
 
+def make_project(path: str, kind: str, root: str, entries: dict[str, os.DirEntry],
+                 exclude: set[str]) -> dict:
+    """Public entry to the row builder, for callers that create projects on disk."""
+    return _make_project(path, kind, root, entries, exclude)
+
+
 def _make_project(path: str, kind: str, root: str, entries: dict[str, os.DirEntry],
                   exclude: set[str]) -> dict:
     proj = {

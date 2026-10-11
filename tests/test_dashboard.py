@@ -240,6 +240,57 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("could not start", self.win.activity.toPlainText())
             self.assertFalse(self.win.activity_dock.isHidden())
 
+    def test_new_project_dialog_launches_cli(self):
+        from codehound.app import NewProjectDialog
+        self.assertTrue(self.win.new_btn.isEnabled())
+        with patch.object(NewProjectDialog, "exec", return_value=NewProjectDialog.DialogCode.Rejected), \
+                patch.object(QProcess, "start") as start:
+            self.win.new_project()  # cancelled — nothing launches
+            start.assert_not_called()
+        with patch.object(NewProjectDialog, "exec", return_value=NewProjectDialog.DialogCode.Accepted), \
+                patch.object(NewProjectDialog, "args", return_value=["clone", "https://example.org/x.git"]), \
+                patch.object(QProcess, "start") as start:
+            self.win.new_project()
+            start.assert_called_once_with(
+                sys.executable, ["-m", "codehound.cli", "clone", "https://example.org/x.git"])
+            self.assertFalse(self.win.new_btn.isEnabled())
+            self.win.new_project()  # busy — ignored while running
+            self.assertEqual(start.call_count, 1)
+            self.win._task_finished("_new_proc", 0, self.win.new_btn, "New Project…", "clone")
+            self.assertTrue(self.win.new_btn.isEnabled())
+            self.assertIsNone(self.win._new_proc)
+
+    def test_new_project_dialog_validation_and_args(self):
+        from codehound.app import NewProjectDialog
+        cfg = config.load_config()
+        dlg = NewProjectDialog(cfg, self.win)
+        self.addCleanup(dlg.deleteLater)
+        # empty form: Ok refuses to accept
+        dlg._check_and_accept()
+        self.assertFalse(dlg.result() == NewProjectDialog.DialogCode.Accepted)
+        self.assertFalse(dlg.error.isHidden())
+        # New tab fills in the adopt dest by default
+        dlg.new_name.setText("fresh")
+        dlg._check_and_accept()
+        self.assertEqual(dlg.args()[0], "new")
+        self.assertEqual(dlg.args()[1], "fresh")
+        self.assertIn("--dest", dlg.args())
+        # Clone tab: catalogue pick fills the source box
+        dlg.tabs.setCurrentIndex(1)
+        idx = next(i for i in range(dlg.clone_pick.count())
+                   if dlg.clone_pick.itemData(i) == ("/projects/project-0", "https://example.org/repo"))
+        self.assertGreater(idx, 0)
+        dlg.clone_pick.setCurrentIndex(idx)
+        self.assertEqual(dlg.clone_source.text(), "https://example.org/repo")
+        # Worktree tab: live destination preview
+        dlg.tabs.setCurrentIndex(2)
+        wt_idx = dlg.wt_project.findData("/projects/project-0")
+        self.assertGreater(wt_idx, 0)
+        dlg.wt_project.setCurrentIndex(wt_idx)
+        dlg.wt_branch.setText("feature/new-ui")
+        self.assertEqual(dlg.wt_dest.text(), "/projects/project-0-feature-new-ui")
+        self.assertEqual(dlg.args(), ["worktree", "/projects/project-0", "feature/new-ui"])
+
     def test_project_branch_labels_and_search(self):
         for project, expected in (
             ({"name": "repo", "branch": "main"}, "repo/main"),
