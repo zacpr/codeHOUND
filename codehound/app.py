@@ -44,9 +44,19 @@ from PySide6.QtWidgets import (
 )
 
 from . import adopt as adopt_mod
-from . import db, launchers
+from . import __version__, db, launchers
 from .config import CONFIG_PATH, load_config
-from .model import COLUMNS, PATH_ROLE, PROJECT_VIEWS, ProjectsModel, ProjectsProxy, project_label
+from .model import (
+    COLUMNS,
+    DEFAULT_HIDDEN_COLUMNS,
+    PATH_ROLE,
+    PROJECT_VIEWS,
+    UPDATE_ROLE,
+    ProjectsModel,
+    ProjectsProxy,
+    UpdateRowDelegate,
+    project_label,
+)
 from .settings import SettingsDialog
 from .theme import apply_theme
 
@@ -273,6 +283,69 @@ class NewProjectDialog(QDialog):
         return ["worktree", self.wt_project.currentData(), self.wt_branch.text().strip()]
 
 
+class _UpdateSettingsDialog(QDialog):
+    """Per-app update settings: custom install location + install policy."""
+
+    def __init__(self, cfg, repo: str, name: str, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self.repo = repo
+        self.setWindowTitle(f"Update Settings — {name or repo}")
+        form = QFormLayout(self)
+        conn = db.connect()
+        try:
+            row = db.get_update(conn, repo)
+        finally:
+            conn.close()
+        form.addRow(QLabel(f"Watching {repo} for new GitHub releases."))
+
+        path_row = QHBoxLayout()
+        self.install_path = QLineEdit((row["install_path"] if row else "") or "")
+        self.install_path.setPlaceholderText(
+            "default — replace in place, else a managed dir with a ~/.local/bin link")
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse)
+        clear = QPushButton("Clear")
+        clear.clicked.connect(self.install_path.clear)
+        path_row.addWidget(self.install_path, 1)
+        path_row.addWidget(browse)
+        path_row.addWidget(clear)
+        holder = QWidget()
+        holder.setLayout(path_row)
+        form.addRow("Install location:", holder)
+
+        self.policy = QComboBox()
+        self.policy.addItem("Follow the global setting", "default")
+        self.policy.addItem("Install automatically", "auto")
+        self.policy.addItem("Never install (check only)", "never")
+        mode = {(1): "auto", (0): "never"}.get(row["auto"] if row else None, "default")
+        self.policy.setCurrentIndex(self.policy.findData(mode))
+        form.addRow("When an update appears:", self.policy)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def _browse(self):
+        path = QFileDialog.getExistingDirectory(self, "Custom install directory",
+                                                self.install_path.text())
+        if path:
+            self.install_path.setText(path)
+
+    def _save(self):
+        conn = db.connect()
+        try:
+            db.set_update_install_path(conn, self.repo, self.install_path.text().strip())
+            db.set_update_auto(conn, self.repo, self.policy.currentData())
+            conn.commit()
+        finally:
+            conn.close()
+        self.accept()
+
+
 class Dashboard(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -363,6 +436,10 @@ class Dashboard(QMainWindow):
         self.search.setPlaceholderText("Search projects, paths, languages…  Ctrl+F")
         self.search.setClearButtonEnabled(True)
         tools.addWidget(self.search, 1)
+        self.updates_filter = QPushButton("Updates")
+        self.updates_filter.setCheckable(True)
+        self.updates_filter.setToolTip("Show only projects with a newer release available")
+        tools.addWidget(self.updates_filter)
         reload_btn = QPushButton("Reload")
         reload_btn.setToolTip("Reload catalogue from disk (F5)")
         tools.addWidget(reload_btn)
@@ -386,8 +463,9 @@ class Dashboard(QMainWindow):
         self.table.setObjectName("projects")
         self.table.setAccessibleName("Project catalogue")
         self.table.setModel(self.proxy)
+        self.table.setItemDelegate(UpdateRowDelegate(self.table))
         self.table.setSortingEnabled(True)
-        self.table.sortByColumn(4, Qt.SortOrder.DescendingOrder)  # Modified
+        self.table.sortByColumn(3, Qt.SortOrder.DescendingOrder)  # Modified
         self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
@@ -434,7 +512,7 @@ class Dashboard(QMainWindow):
         for col, (title, _) in enumerate(COLUMNS):
             action = columns_menu.addAction(title)
             action.setCheckable(True)
-            action.setChecked(col not in (1, 5, 6, 8))
+            action.setChecked(col not in DEFAULT_HIDDEN_COLUMNS)
             self.table.setColumnHidden(col, not action.isChecked())
             action.toggled.connect(lambda checked, c=col: self.table.setColumnHidden(c, not checked))
         columns_btn.setMenu(columns_menu)
@@ -442,6 +520,10 @@ class Dashboard(QMainWindow):
         self.setCentralWidget(central)
         self.count_label = QLabel()
         self.statusBar().addPermanentWidget(self.count_label)
+        self.version_label = QLabel(f"v{__version__}")
+        self.version_label.setProperty("muted", True)
+        self.version_label.setToolTip(f"codeHOUND {__version__}")
+        self.statusBar().addPermanentWidget(self.version_label)
         self.activity = QPlainTextEdit()
         self.activity.setReadOnly(True)
         self.activity.setMaximumBlockCount(500)
@@ -455,9 +537,11 @@ class Dashboard(QMainWindow):
         )
 
         self.search.textChanged.connect(self._filter_changed)
+        self.updates_filter.toggled.connect(self._filter_updates_only)
         self.scan_btn.clicked.connect(self.start_scan)
         self.sync_btn.clicked.connect(self.start_sync)
         self.updates_btn.clicked.connect(self.start_updates)
+        self.install_updates_btn.clicked.connect(self.install_all_updates)
         self.ask_btn.clicked.connect(self.ask_ai)
         self.new_btn.clicked.connect(self.new_project)
         reload_btn.clicked.connect(self.reload)
@@ -476,7 +560,8 @@ class Dashboard(QMainWindow):
         self.addAction(reload_action)
 
         self.reload()
-        for col, width in ((0, 210), (1, 80), (2, 95), (3, 115), (4, 155), (5, 155), (6, 170), (7, 280), (9, 95)):
+        for col, width in ((0, 210), (1, 115), (2, 280), (3, 155), (4, 95),
+                           (5, 95), (6, 140), (9, 170)):
             self.table.setColumnWidth(col, width)
 
     def _build_sidebar(self) -> QFrame:
@@ -518,6 +603,11 @@ class Dashboard(QMainWindow):
         self.updates_btn = QPushButton("Check Updates")
         self.updates_btn.setToolTip("Look for newer GitHub releases of watched projects")
         layout.addWidget(self.updates_btn)
+        self.install_updates_btn = QPushButton("Install Updates")
+        self.install_updates_btn.setProperty("accent", True)
+        self.install_updates_btn.setEnabled(False)
+        self.install_updates_btn.setToolTip("No updates available yet")
+        layout.addWidget(self.install_updates_btn)
         self.activity_btn = QPushButton("Activity")
         layout.addWidget(self.activity_btn)
         settings = QPushButton("Settings")
@@ -785,8 +875,14 @@ class Dashboard(QMainWindow):
         self._update_count()
         self._update_inspector()
 
+    def _filter_updates_only(self, on: bool):
+        self.proxy.set_updates_only(on)
+        self._update_count()
+        self._update_inspector()
+
     def _reset_filters(self):
         self.search.clear()
+        self.updates_filter.setChecked(False)
         self._set_view("all")
 
     def _update_inspector(self, *_args):
@@ -968,6 +1064,75 @@ class Dashboard(QMainWindow):
         self._start_cli("_updates_proc", ["updates", "--check"],
                         self.updates_btn, "Checking…", "Check Updates")
 
+    def install_all_updates(self):
+        """Confirm the pending updates, then install every one in a single run."""
+        if self._updates_proc is not None:
+            return
+        try:
+            conn = db.connect()
+            try:
+                rows = db.available_updates(conn)
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return
+        rows = [r for r in rows if r["repo"] != self.cfg.self_repo]
+        if not rows:
+            self.statusBar().showMessage("install updates: nothing pending")
+            return
+        lines = []
+        for r in rows[:12]:
+            have = r["current_tag"] or "unknown"
+            lines.append(f"  • {r['name'] or r['repo']}  {have} → {r['latest_tag']}")
+        if len(rows) > 12:
+            lines.append(f"  • …and {len(rows) - 12} more")
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Install updates")
+        box.setText(f"Install {len(rows)} update(s)?")
+        box.setInformativeText("\n".join(lines))
+        box.setStandardButtons(QMessageBox.StandardButton.Yes
+                               | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.Yes)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        self._start_cli("_updates_proc", ["updates", "--install-all"],
+                        self.install_updates_btn, "Installing…", "Install Updates")
+
+    def _install_one_update(self, repo: str):
+        """Context menu: install just this app's newest release."""
+        if self._updates_proc is not None:
+            return
+        self._start_cli("_updates_proc", ["update", repo],
+                        self.updates_btn, "Installing…", "Check Updates")
+
+    def _update_settings(self, repo: str, name: str):
+        dlg = _UpdateSettingsDialog(self.cfg, repo, name, self)
+        if dlg.exec() == _UpdateSettingsDialog.DialogCode.Accepted:
+            self.reload()
+            self.statusBar().showMessage(f"update settings saved for {repo}")
+
+    def _set_update_button_state(self, n_updates: int):
+        """Install Updates is only enabled when something is pending."""
+        btn = self.install_updates_btn
+        if n_updates <= 0:
+            btn.setEnabled(False)
+            btn.setToolTip("No updates available yet")
+        else:
+            btn.setEnabled(self._updates_proc is None)
+            btn.setToolTip(
+                f"Install {n_updates} available update(s) — "
+                "each app's Update Settings decide where and how"
+            )
+        if n_updates:
+            self.updates_filter.setToolTip(
+                f"Show only the {n_updates} project(s) with a newer release available"
+            )
+        else:
+            self.updates_filter.setToolTip(
+                "Show only projects with a newer release available"
+            )
+
     def start_self_update(self):
         """Update codeHOUND itself, then quit and come back on the new build."""
         if self._updates_proc is not None:
@@ -1056,17 +1221,22 @@ class Dashboard(QMainWindow):
         if not rows:
             self.statusBar().showMessage("updates: everything is current")
             return
-        first = rows[0]
-        text = (f"{first['name'] or first['repo']} {first['latest_tag']} is available "
-                f"(you have {first['current_tag'] or 'unknown'})")
-        if len(rows) > 1:
-            text += f" · +{len(rows) - 1} more"
+        names = [f"{r['name'] or r['repo']} → {r['latest_tag']}" for r in rows[:3]]
+        text = "\n".join(names)
+        if len(rows) > 3:
+            text += f"\n…and {len(rows) - 3} more"
         if self._staged_count:
-            text += " — click to install"
-        self.statusBar().showMessage(f"{len(rows)} update(s) available — see Activity")
+            text += "\n\nClick here to install the staged downloads."
+        else:
+            text += "\n\nUse Install Updates to apply them."
+        self.statusBar().showMessage(
+            f"{len(rows)} update(s) available — Install Updates is ready"
+        )
         if self.tray is not None:
-            self.tray.showMessage("codeHOUND — updates", text,
-                                  QSystemTrayIcon.MessageIcon.Information, 8000)
+            self.tray.showMessage(
+                f"codeHOUND — {len(rows)} update(s) available", text,
+                QSystemTrayIcon.MessageIcon.Information, 10000,
+            )
 
     def activate_staged(self):
         """Tray message click: install the updates staging already verified."""
@@ -1106,6 +1276,26 @@ class Dashboard(QMainWindow):
             act = menu.addAction(f"Open in {name}")
             act.triggered.connect(lambda _=False, n=name, p=path: launchers.launch(self.cfg, n, p))
         menu.addSeparator()
+        proj = self.model.row(self.proxy.mapToSource(index).row()) if index.isValid() else None
+        update = self.model.update_for(proj) if proj else None
+        if update:
+            act = menu.addAction(
+                f"Install Update — {update['latest_tag']}"
+            )
+            act.setToolTip(
+                f"{update['repo']}: {update['current_tag'] or 'unknown'} → "
+                f"{update['latest_tag']}"
+            )
+            act.triggered.connect(
+                lambda _=False, r=update["repo"]: self._install_one_update(r)
+            )
+        if proj and update:
+            act = menu.addAction("Update Settings…")
+            act.setToolTip("Per-app install path and auto-install policy")
+            act.triggered.connect(
+                lambda _=False, r=update["repo"], n=proj["name"]:
+                self._update_settings(r, n)
+            )
         from .ai import is_configured
         ask_menu = menu.addMenu("Ask AI")
         ask_menu.setEnabled(is_configured(self.cfg))
@@ -1239,10 +1429,13 @@ def run_app() -> int:
     win = Dashboard()
 
     tray = QSystemTrayIcon(icon)
-    tray.setToolTip("codeHOUND — repo hunter")
+    tray.setToolTip(f"codeHOUND {__version__} — repo hunter")
     menu = QMenu()
     from .ai import is_configured
     ai_ready = is_configured(win.cfg)
+    version_act = menu.addAction(f"codeHOUND v{__version__}")
+    version_act.setEnabled(False)
+    menu.addSeparator()
     menu.addAction("Open Dashboard").triggered.connect(lambda: (win.show(), win.raise_(), win.activateWindow()))
     menu.addAction("Scan Now").triggered.connect(win.start_scan)
     menu.addAction("Sync Accounts").triggered.connect(win.start_sync)
