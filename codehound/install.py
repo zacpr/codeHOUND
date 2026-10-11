@@ -10,7 +10,14 @@ SYSTEMD_DIR = Path.home() / ".config/systemd/user"
 APPS_DIR = Path.home() / ".local/share/applications"
 AUTOSTART_DIR = Path.home() / ".config/autostart"
 
+# Bump whenever the SERVICE/TIMER templates change, so an upgraded codeHOUND
+# notices a per-user unit written by an older version and rewrites it. Units
+# written before markers existed read back as version 0.
+UNIT_VERSION = 2
+_UNIT_MARK = "# codehound-unit-version:"
+
 SERVICE = """\
+{mark} {unit_version}
 [Unit]
 Description=codeHOUND project scan
 
@@ -24,6 +31,7 @@ IOSchedulingClass=idle
 """
 
 TIMER = """\
+{mark} {unit_version}
 [Unit]
 Description=codeHOUND periodic project scan
 
@@ -67,20 +75,69 @@ def _exe() -> str:
     return f"{sys.executable} -m codehound.cli"
 
 
-def install_timer(every: str = "6h") -> int:
+def _unit_version(path: Path) -> int:
+    """The unit-version marker written into an installed unit (0 if absent)."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return -1  # missing or unreadable — needs (re)writing
+    for line in text.splitlines():
+        if line.startswith(_UNIT_MARK):
+            try:
+                return int(line.split(":", 1)[1].strip())
+            except ValueError:
+                return 0
+    return 0
+
+
+def units_current() -> bool:
+    """True when the installed systemd units match this codeHOUND version.
+
+    An RPM upgrade replaces the code but not the per-user unit files, so a
+    unit written by an older release keeps running the old command line (for
+    example one without 'updates --check'). Only the marker is compared: a
+    source checkout must never rewrite units that belong to the installed
+    package, so a matching marker is taken as good news.
+    """
+    for name in ("codehound-scan.service", "codehound-scan.timer"):
+        if _unit_version(SYSTEMD_DIR / name) < UNIT_VERSION:
+            return False
+    return True
+
+
+def ensure_units(progress=print) -> bool:
+    """Rewrite + reload the systemd units when they are stale. Never raises."""
+    try:
+        if units_current():
+            return False
+        progress("systemd units are from an older codeHOUND — refreshing…")
+        if install_timer(progress=progress) != 0:
+            progress("could not refresh the scan timer; run "
+                     "'codehound install-timer' by hand")
+            return False
+        progress("scan timer refreshed")
+        return True
+    except Exception as exc:  # self-heal must never break a scan
+        progress(f"unit refresh skipped: {exc}")
+        return False
+
+
+def install_timer(every: str = "6h", progress=print) -> int:
     SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
-    (SYSTEMD_DIR / "codehound-scan.service").write_text(SERVICE.format(exe=_exe()))
-    (SYSTEMD_DIR / "codehound-scan.timer").write_text(TIMER.format(every=every))
+    args = {"exe": _exe(), "every": every,
+            "mark": _UNIT_MARK, "unit_version": UNIT_VERSION}
+    (SYSTEMD_DIR / "codehound-scan.service").write_text(SERVICE.format(**args))
+    (SYSTEMD_DIR / "codehound-scan.timer").write_text(TIMER.format(**args))
     for cmd in (
         ["systemctl", "--user", "daemon-reload"],
         ["systemctl", "--user", "enable", "--now", "codehound-scan.timer"],
     ):
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
-            print(f"{' '.join(cmd)} failed: {r.stderr.strip()}", file=sys.stderr)
+            progress(f"{' '.join(cmd)} failed: {r.stderr.strip()}")
             return 1
-    print(f"timer installed: scans every {every} (+5min after boot)")
-    print("check with: systemctl --user list-timers codehound-scan.timer")
+    progress(f"timer installed: scans every {every} (+5min after boot)")
+    progress("check with: systemctl --user list-timers codehound-scan.timer")
     return 0
 
 

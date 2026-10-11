@@ -17,6 +17,10 @@ def cmd_scan(args) -> int:
     from . import db, ollama, scanner
 
     cfg = load_config()
+    # an RPM upgrade leaves the per-user systemd units behind; the first scan
+    # after an upgrade rewrites them so the timer runs the new command line
+    from .install import ensure_units
+    ensure_units(progress=_say)
     result = scanner.run_scan(cfg, roots=args.root or None, verbose=args.verbose, progress=_say)
 
     if cfg.ollama_enabled and cfg.ollama_classify and result.candidates:
@@ -182,6 +186,8 @@ def cmd_janitor(args) -> int:
 
 def cmd_app(args) -> int:
     from .app import run_app
+    from .install import ensure_units
+    ensure_units(progress=_say)
     return run_app()
 
 
