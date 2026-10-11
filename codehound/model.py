@@ -94,9 +94,16 @@ class ProjectsModel(QAbstractTableModel):
         """The available-release row for a project, when a newer release exists."""
         return self._updates_by_path.get(proj["path"])
 
-    def updates_count(self) -> int:
-        """Projects with a newer release available."""
-        return len(self._updates_by_path)
+    def updates_count(self, exclude_repo: str = "") -> int:
+        """Projects with a newer release available.
+
+        `exclude_repo` (codeHOUND's own repo) is left out — its update goes
+        through 'Update codeHOUND…', not the Install Updates button.
+        """
+        if not exclude_repo:
+            return len(self._updates_by_path)
+        return sum(1 for u in self._updates_by_path.values()
+                   if u["repo"] != exclude_repo)
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._rows)

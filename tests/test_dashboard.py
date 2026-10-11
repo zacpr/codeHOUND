@@ -265,6 +265,45 @@ class DashboardTests(unittest.TestCase):
         # project-0 has a remote, but not a GitHub one
         self.assertNotIn("Update Settings…", menu_titles("/projects/project-0"))
 
+    def test_self_repo_row_shows_badge_but_not_install_button(self):
+        # codeHOUND's own update row lights up its clone row (path-keyed),
+        # but is excluded from the Install Updates count and from Update
+        # Settings — it installs through 'Update codeHOUND…' instead.
+        conn = db.connect()
+        try:
+            conn.execute(
+                "UPDATE projects SET remote_url = "
+                "'https://github.com/zacpr/codeHOUND.git' WHERE path = '/projects/project-3'")
+            db.upsert_update(conn, {
+                "repo": "zacpr/codeHOUND", "path": "/projects/project-3",
+                "name": "codeHOUND", "current_tag": "0.5.1.0",
+                "latest_tag": "v0.5.2.0",
+                "published_at": "2026-10-12T00:00:00+00:00",
+                "asset_name": "codehound-0.5.2.0-1.fc44.noarch.rpm",
+                "asset_url": "https://example.org/codehound.rpm",
+                "available": 1, "compatible": 1, "reason": "",
+                "last_checked": "2026-10-12T00:00:00+00:00",
+            })
+            conn.commit()
+        finally:
+            conn.close()
+        self.win.reload()
+        # badge shows on the row…
+        row = next(r for r in range(self.win.proxy.rowCount())
+                   if self.win.proxy.index(r, 0).data(PATH_ROLE) == "/projects/project-3")
+        self.assertEqual(self.win.proxy.index(row, 6).data(), "⬆ v0.5.2.0")
+        # …but the Install Updates button ignores it (self goes via tray menu)
+        self.assertEqual(self.win.model.updates_count("zacpr/codeHOUND"), 0)
+        self.assertEqual(self.win.model.updates_count(), 1)
+        self.assertFalse(self.win.install_updates_btn.isEnabled())
+        # context menu offers the self-update path, not Update Settings
+        rect = self.win.table.visualRect(self.win.proxy.index(row, 0))
+        menu = self.win._build_context_menu(rect.center())
+        self.assertIsNotNone(menu)
+        titles = [a.text() for a in menu.actions()]
+        self.assertIn("Install Update — v0.5.2.0", titles)
+        self.assertNotIn("Update Settings…", titles)
+
     def test_cody_icon_installation_replaces_legacy_icon(self):
         root = Path(self.temp.name) / "icons"
         old = root / "scalable/apps/codehound.svg"

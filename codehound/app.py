@@ -1040,7 +1040,8 @@ class Dashboard(QMainWindow):
             "Choose your search roots in Settings, then Scan Now."
             if not self.model.rowCount() else "Try a different search or catalogue view."
         )
-        self._set_update_button_state(self.model.updates_count())
+        self._set_update_button_state(
+            self.model.updates_count(self.cfg.self_repo))
 
     # ----- background CLI tasks (scan / sync) -----
     def _start_cli(self, attr: str, args: list[str], btn: QPushButton, busy: str, idle: str):
@@ -1126,9 +1127,10 @@ class Dashboard(QMainWindow):
 
     def _watch_repo(self, proj: dict | None, update: dict | None) -> str:
         """Repo whose update settings apply: the watched row's when one
-        exists, else the project's GitHub remote ('' = not watchable)."""
+        exists, else the project's GitHub remote ('' = not watchable, and
+        never codeHOUND itself — that goes through 'Update codeHOUND…')."""
         if update:
-            return update["repo"]
+            return "" if update["repo"] == self.cfg.self_repo else update["repo"]
         if not proj:
             return ""
         from .updates import parse_github_repo
@@ -1241,23 +1243,35 @@ class Dashboard(QMainWindow):
         except sqlite3.Error:
             return
         self._staged_count = sum(1 for r in staged if (r["staged_dir"] or ""))
-        if not rows:
+        # codeHOUND's own row installs through 'Update codeHOUND…', never the
+        # Install Updates button — keep it out of that flow but still mention it.
+        mine = (self.cfg.self_repo or "").strip()
+        self_row = next((r for r in rows if r["repo"] == mine), None) if mine else None
+        rows = [r for r in rows if r["repo"] != mine]
+        if not rows and self_row is None:
             self.statusBar().showMessage("updates: everything is current")
             return
-        names = [f"{r['name'] or r['repo']} → {r['latest_tag']}" for r in rows[:3]]
-        text = "\n".join(names)
+        parts = [f"{r['name'] or r['repo']} → {r['latest_tag']}" for r in rows[:3]]
         if len(rows) > 3:
-            text += f"\n…and {len(rows) - 3} more"
-        if self._staged_count:
-            text += "\n\nClick here to install the staged downloads."
+            parts.append(f"…and {len(rows) - 3} more")
+        if self_row is not None:
+            parts.append(f"codeHOUND → {self_row['latest_tag']} "
+                         "(use 'Update codeHOUND…' in the tray menu)")
+        text = "\n".join(parts)
+        if rows:
+            text += ("\n\nClick here to install the staged downloads."
+                     if self._staged_count else
+                     "\n\nUse Install Updates to apply them.")
+            self.statusBar().showMessage(
+                f"{len(rows)} update(s) available — Install Updates is ready"
+            )
         else:
-            text += "\n\nUse Install Updates to apply them."
-        self.statusBar().showMessage(
-            f"{len(rows)} update(s) available — Install Updates is ready"
-        )
+            self.statusBar().showMessage(
+                "codeHOUND has an update — use 'Update codeHOUND…'")
         if self.tray is not None:
+            n = len(rows) + (1 if self_row is not None else 0)
             self.tray.showMessage(
-                f"codeHOUND — {len(rows)} update(s) available", text,
+                f"codeHOUND — {n} update(s) available", text,
                 QSystemTrayIcon.MessageIcon.Information, 10000,
             )
 
@@ -1310,13 +1324,20 @@ class Dashboard(QMainWindow):
             act = menu.addAction(
                 f"Install Update — {update['latest_tag']}"
             )
-            act.setToolTip(
-                f"{update['repo']}: {update['current_tag'] or 'unknown'} → "
-                f"{update['latest_tag']}"
-            )
-            act.triggered.connect(
-                lambda _=False, r=update["repo"]: self._install_one_update(r)
-            )
+            if update["repo"] == self.cfg.self_repo:
+                act.setToolTip(
+                    f"codeHOUND {update['current_tag'] or 'unknown'} → "
+                    f"{update['latest_tag']} — quits and restarts on the new build"
+                )
+                act.triggered.connect(lambda _=False: self.start_self_update())
+            else:
+                act.setToolTip(
+                    f"{update['repo']}: {update['current_tag'] or 'unknown'} → "
+                    f"{update['latest_tag']}"
+                )
+                act.triggered.connect(
+                    lambda _=False, r=update["repo"]: self._install_one_update(r)
+                )
         watch_repo = self._watch_repo(proj, update)
         if proj and watch_repo:
             act = menu.addAction("Update Settings…")

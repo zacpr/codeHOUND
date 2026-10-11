@@ -183,6 +183,37 @@ class SelfUpdateTests(_Base):
         row = check_self_update(_Cfg(), self.conn, progress=self.noop)
         self.assertEqual(row["available"], 0)
 
+    def test_check_self_update_stamps_clone_path(self):
+        """The row's path must be the catalogued clone so the dashboard
+        (which keys updates by path) shows the ⬆ badge on our own row."""
+        db.upsert_project(self.conn, {
+            "path": "/r/codeHOUND", "kind": "git", "name": "codeHOUND",
+            "root": "/r", "language": "Python", "branch": "main",
+            "remote_url": "https://github.com/zacpr/codeHOUND.git",
+            "last_commit_date": None, "last_commit_msg": None, "dirty": 0,
+            "created": None, "modified": None, "size_approx": None})
+        db.upsert_project(self.conn, {
+            "path": "/r/other", "kind": "git", "name": "other",
+            "root": "/r", "language": "Python", "branch": "main",
+            "remote_url": "https://github.com/zacpr/other.git",
+            "last_commit_date": None, "last_commit_msg": None, "dirty": 0,
+            "created": None, "modified": None, "size_approx": None})
+        self.conn.commit()
+        patcher = patch("codehound.updates._latest_release",
+                        return_value=self._release("v0.5.0", "codehound-0.5.0-x86_64.rpm"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        row = check_self_update(_Cfg(), self.conn, progress=self.noop)
+        self.assertEqual(row["path"], "/r/codeHOUND")
+
+    def test_check_self_update_without_clone_keeps_path_blank(self):
+        patcher = patch("codehound.updates._latest_release",
+                        return_value=self._release("v0.5.0", "codehound-0.5.0-x86_64.rpm"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        row = check_self_update(_Cfg(), self.conn, progress=self.noop)
+        self.assertEqual(row["path"], "")
+
     def test_repo_without_releases_returns_none(self):
         patcher = patch("codehound.updates._latest_release", return_value=None)
         patcher.start()

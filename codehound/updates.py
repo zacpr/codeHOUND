@@ -937,13 +937,30 @@ def self_repo(cfg) -> str:
     return (getattr(cfg, "self_repo", "") or "").strip()
 
 
+def _self_clone_path(conn: sqlite3.Connection, repo: str) -> str:
+    """Path of the catalogued clone whose remote is `repo` ('' = none).
+
+    The self row is about the *installed* package, but stamping it with the
+    clone's path is what lets the dashboard light up that row with the ⬆ badge
+    (the model keys updates by project path).
+    """
+    for row in db.all_projects(conn):
+        if row["missing"] or not row["remote_url"]:
+            continue
+        if parse_github_repo(row["remote_url"]) == repo:
+            return row["path"]
+    return ""
+
+
 def check_self_update(cfg, conn: sqlite3.Connection,
                       progress=print) -> sqlite3.Row | None:
     """Refresh the watch row for codeHOUND's own release feed.
 
     The row's `current_tag` is the *installed* version, not a clone's tag —
-    self-update cares about what is running, not what is checked out. Returns
-    the row, or None when self-update is off or the repo publishes nothing.
+    self-update cares about what is running, not what is checked out. The
+    row's `path` is the catalogued clone when one exists, so the dashboard
+    row shows the badge. Returns the row, or None when self-update is off
+    or the repo publishes nothing.
     """
     repo = self_repo(cfg)
     if not repo:
@@ -959,7 +976,7 @@ def check_self_update(cfg, conn: sqlite3.Connection,
     asset, reason = pick_asset(release.get("assets", []))
     is_new = newer(tag, __version__)
     db.upsert_update(conn, {
-        "repo": repo, "path": "", "name": "codeHOUND",
+        "repo": repo, "path": _self_clone_path(conn, repo), "name": "codeHOUND",
         "current_tag": __version__, "latest_tag": tag,
         "published_at": release.get("published_at"),
         "asset_name": (asset or {}).get("name"),
