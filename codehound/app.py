@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -11,10 +12,13 @@ from PySide6.QtGui import QAction, QGuiApplication, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QDockWidget,
+    QFileDialog,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -31,6 +35,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QSystemTrayIcon,
+    QTabWidget,
     QTableView,
     QVBoxLayout,
     QWidget,
@@ -100,6 +105,172 @@ class AskDialog(QDialog):
             self.output.appendPlainText(f"\n(ask exited with code {code} — check Settings → AI)")
 
 
+def _catalogue_projects(kind: str | None = None) -> list:
+    """Live catalogue rows for the dialog pickers, newest first."""
+    conn = db.connect()
+    try:
+        rows = [r for r in db.all_projects(conn) if not r["missing"]]
+    finally:
+        conn.close()
+    if kind:
+        rows = [r for r in rows if r["kind"] == kind]
+    return rows
+
+
+class NewProjectDialog(QDialog):
+    """Create a new project, clone one, or add a worktree — hands off to the CLI."""
+
+    def __init__(self, cfg, parent=None, default_tab: int = 0, project_path: str | None = None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self.setWindowTitle("New Project")
+        self.resize(620, 460)
+        layout = QVBoxLayout(self)
+
+        from .ai import is_configured
+        self._ai_ready = is_configured(cfg)
+
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        # --- New ---
+        new_tab = QWidget()
+        new_form = QFormLayout(new_tab)
+        self.new_name = QLineEdit()
+        self.new_name.setPlaceholderText("my-new-tool")
+        new_form.addRow("Name:", self.new_name)
+        self.new_desc = QPlainTextEdit()
+        self.new_desc.setPlaceholderText("What is it? (goes in the README)")
+        self.new_desc.setMaximumHeight(72)
+        new_form.addRow("Description:", self.new_desc)
+        self.new_scaffold = QCheckBox("Ask AI to scaffold starter files")
+        if not self._ai_ready:
+            self.new_scaffold.setEnabled(False)
+            self.new_scaffold.setToolTip("Configure an AI provider in Settings → AI first")
+        new_form.addRow(self.new_scaffold)
+        self.new_dest = QLineEdit(cfg.adopt_dest)
+        new_form.addRow("In folder:", self._dest_row(self.new_dest))
+        self.tabs.addTab(new_tab, "New project")
+
+        # --- Clone ---
+        clone_tab = QWidget()
+        clone_form = QFormLayout(clone_tab)
+        self.clone_source = QLineEdit()
+        self.clone_source.setPlaceholderText("https://… or git@host:owner/repo.git, or a local path")
+        clone_form.addRow("Source:", self.clone_source)
+        self.clone_pick = QComboBox()
+        self.clone_pick.addItem("— pick a catalogue project to fill the source —", None)
+        for row in _catalogue_projects():
+            hint = row["remote_url"] or row["path"]
+            self.clone_pick.addItem(f"{row['name']}  ({hint})", (row["path"], row["remote_url"]))
+        self.clone_pick.currentIndexChanged.connect(self._clone_pick_changed)
+        clone_form.addRow("Or from catalogue:", self.clone_pick)
+        self.clone_name = QLineEdit()
+        self.clone_name.setPlaceholderText("optional — defaults to the source name")
+        clone_form.addRow("Rename to:", self.clone_name)
+        self.clone_dest = QLineEdit(cfg.clone_dest)
+        clone_form.addRow("Into folder:", self._dest_row(self.clone_dest))
+        self.tabs.addTab(clone_tab, "Clone")
+
+        # --- Worktree ---
+        wt_tab = QWidget()
+        wt_form = QFormLayout(wt_tab)
+        self.wt_project = QComboBox()
+        self.wt_project.addItem("— pick a project —", None)
+        for row in _catalogue_projects("git"):
+            self.wt_project.addItem(f"{row['name']}  ({row['path']})", row["path"])
+        wt_form.addRow("Project:", self.wt_project)
+        self.wt_branch = QLineEdit()
+        self.wt_branch.setPlaceholderText("feature-x — new branch, or an existing one")
+        self.wt_branch.textChanged.connect(self._wt_preview)
+        wt_form.addRow("Branch:", self.wt_branch)
+        self.wt_dest = _label("(pick a project and branch)", muted=True)
+        wt_form.addRow("Worktree lands at:", self.wt_dest)
+        self.tabs.addTab(wt_tab, "Add worktree")
+
+        self.error = _label()
+        self.error.setStyleSheet("color: #f38ba8;")
+        self.error.setVisible(False)
+        layout.addWidget(self.error)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        ok_btn.setProperty("primary", True)
+        buttons.accepted.connect(self._check_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.tabs.setCurrentIndex(default_tab)
+        if project_path:
+            idx = self.wt_project.findData(project_path)
+            if idx >= 0:
+                self.wt_project.setCurrentIndex(idx)
+                self._wt_preview()
+
+    def _dest_row(self, edit: QLineEdit) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.addWidget(edit, 1)
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(
+            lambda: (p := QFileDialog.getExistingDirectory(self, "Choose folder", edit.text()))
+            and edit.setText(p)
+        )
+        row.addWidget(browse)
+        return row
+
+    def _clone_pick_changed(self, _index):
+        data = self.clone_pick.currentData()
+        if data:
+            _path, remote = data
+            self.clone_source.setText(remote or _path)
+
+    def _wt_preview(self, _text=""):
+        src = self.wt_project.currentData()
+        branch = self.wt_branch.text().strip()
+        if src and branch:
+            slug = re.sub(r"[^\w.-]+", "-", branch).strip("-") or "branch"
+            self.wt_dest.setText(str(Path(src).parent / f"{Path(src).name}-{slug}"))
+        else:
+            self.wt_dest.setText("(pick a project and branch)")
+
+    def _check_and_accept(self):
+        tab = self.tabs.currentIndex()
+        if tab == 0 and not self.new_name.text().strip():
+            self.error.setText("Give the new project a name.")
+        elif tab == 1 and not self.clone_source.text().strip():
+            self.error.setText("Paste a git URL / local path, or pick a catalogue project.")
+        elif tab == 2 and (not self.wt_project.currentData() or not self.wt_branch.text().strip()):
+            self.error.setText("Pick a project and a branch name.")
+        else:
+            self.accept()
+            return
+        self.error.setVisible(True)
+
+    def args(self) -> list[str]:
+        """CLI argv for the selected tab (validated by _check_and_accept)."""
+        tab = self.tabs.currentIndex()
+        if tab == 0:
+            out = ["new", self.new_name.text().strip()]
+            desc = self.new_desc.toPlainText().strip()
+            if desc:
+                out += ["--description", desc]
+            if self.new_scaffold.isChecked():
+                out.append("--scaffold")
+            if dest := self.new_dest.text().strip():
+                out += ["--dest", dest]
+            return out
+        if tab == 1:
+            out = ["clone", self.clone_source.text().strip()]
+            if name := self.clone_name.text().strip():
+                out += ["--name", name]
+            if dest := self.clone_dest.text().strip():
+                out += ["--dest", dest]
+            return out
+        return ["worktree", self.wt_project.currentData(), self.wt_branch.text().strip()]
+
+
 class Dashboard(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -111,6 +282,7 @@ class Dashboard(QMainWindow):
         self._scan_proc: QProcess | None = None
         self._sync_proc: QProcess | None = None
         self._digest_proc: QProcess | None = None
+        self._new_proc: QProcess | None = None
         self._view = "all"
         self._pinned_paths = self._load_pins()
         self._featured: list[dict] = []
@@ -142,6 +314,10 @@ class Dashboard(QMainWindow):
         self.ask_btn.setProperty("accent", True)
         self.ask_btn.setToolTip("Ask across the catalogue")
         heading.addWidget(self.ask_btn)
+        self.new_btn = QPushButton("New Project…")
+        self.new_btn.setProperty("accent", True)
+        self.new_btn.setToolTip("Create a new project, clone one, or add a worktree")
+        heading.addWidget(self.new_btn)
         self.scan_btn = QPushButton("Scan Now")
         self.scan_btn.setProperty("primary", True)
         heading.addWidget(self.scan_btn)
@@ -277,6 +453,7 @@ class Dashboard(QMainWindow):
         self.scan_btn.clicked.connect(self.start_scan)
         self.sync_btn.clicked.connect(self.start_sync)
         self.ask_btn.clicked.connect(self.ask_ai)
+        self.new_btn.clicked.connect(self.new_project)
         reload_btn.clicked.connect(self.reload)
         self.details_btn.toggled.connect(self.inspector.setVisible)
         self.table.doubleClicked.connect(self._open_default)
@@ -778,6 +955,12 @@ class Dashboard(QMainWindow):
     def start_sync(self):
         self._start_cli("_sync_proc", ["sync"], self.sync_btn, "Syncing…", "Sync Accounts")
 
+    def new_project(self, default_tab: int = 0):
+        dlg = NewProjectDialog(self.cfg, self, default_tab, self._selected_path())
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._start_cli("_new_proc", dlg.args(), self.new_btn, "Working…", "New Project…")
+
     def refresh_digest(self):
         if not self.cfg.ai_catalogue_summary:
             self.statusBar().showMessage(
@@ -852,6 +1035,7 @@ class Dashboard(QMainWindow):
             lambda: subprocess.Popen(["xdg-open", path])
         )
         menu.addAction("Adopt into repos…").triggered.connect(lambda: self._adopt(path))
+        menu.addAction("Add worktree…").triggered.connect(lambda: self.new_project(default_tab=2))
         menu.addAction("Copy path").triggered.connect(
             lambda: QGuiApplication.clipboard().setText(path)
         )

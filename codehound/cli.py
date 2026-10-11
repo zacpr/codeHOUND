@@ -194,6 +194,48 @@ def cmd_adopt(args) -> int:
     return 0
 
 
+def _newproj_fail(action: str, e: Exception) -> int:
+    print(f"{action}: {e}", file=sys.stderr)
+    return 1
+
+
+def cmd_new(args) -> int:
+    from . import newproj
+
+    cfg = load_config()
+    try:
+        dest = newproj.create_project(
+            cfg, args.name, args.description, args.scaffold, args.dest, progress=_say)
+    except (newproj.NewProjectError, FileExistsError, ValueError) as e:
+        return _newproj_fail("new", e)
+    _say(f"new project ready at {dest}")
+    return 0
+
+
+def cmd_clone(args) -> int:
+    from . import newproj
+
+    cfg = load_config()
+    try:
+        dest = newproj.clone_project(cfg, args.source, args.name, args.dest, progress=_say)
+    except (newproj.NewProjectError, FileExistsError, ValueError) as e:
+        return _newproj_fail("clone", e)
+    _say(f"clone ready at {dest}")
+    return 0
+
+
+def cmd_worktree(args) -> int:
+    from . import newproj
+
+    cfg = load_config()
+    try:
+        dest = newproj.add_worktree(cfg, args.path, args.branch, args.dest, progress=_say)
+    except (newproj.NewProjectError, FileExistsError, ValueError) as e:
+        return _newproj_fail("worktree", e)
+    _say(f"worktree ready at {dest}")
+    return 0
+
+
 def cmd_install_timer(args) -> int:
     from .install import install_timer
     return install_timer(every=args.every)
@@ -243,6 +285,26 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("path", help="project directory to adopt")
     p.add_argument("--name", help="destination name (default: auto-unique)")
     p.set_defaults(func=cmd_adopt)
+
+    p = sub.add_parser("new", help="create a brand-new git project in the repos dir")
+    p.add_argument("name", help="project name")
+    p.add_argument("--description", "-d", help="what the project is (goes in the README)")
+    p.add_argument("--scaffold", action="store_true",
+                   help="ask the configured AI to write starter files (falls back to a plain README)")
+    p.add_argument("--dest", help="destination directory (default: [adopt] dest)")
+    p.set_defaults(func=cmd_new)
+
+    p = sub.add_parser("clone", help="clone a git URL or local repo into the clone dir")
+    p.add_argument("source", help="git URL or path to a local repository")
+    p.add_argument("--name", help="destination name (default: from the source)")
+    p.add_argument("--dest", help="destination directory (default: [clone] dest)")
+    p.set_defaults(func=cmd_clone)
+
+    p = sub.add_parser("worktree", help="add a branch as a sibling worktree of a project")
+    p.add_argument("path", help="existing git project to branch from")
+    p.add_argument("branch", help="branch to create or check out")
+    p.add_argument("--dest", help="parent directory for the worktree (default: beside the project)")
+    p.set_defaults(func=cmd_worktree)
 
     p = sub.add_parser("install-timer", help="install + enable the systemd user scan timer")
     p.add_argument("--every", default="6h", help="scan interval (systemd time span, default 6h)")

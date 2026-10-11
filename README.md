@@ -71,6 +71,10 @@ codehound ask "question"    # ask the AI across your whole project catalogue
 codehound ask --path P "?"  # ask about one project
 codehound app               # tray icon + dashboard
 codehound adopt PATH        # copy a project into ~/repos under a unique name
+codehound new NAME          # create a brand-new git project in ~/repos
+codehound new NAME -d "…" --scaffold  # …with AI-written starter files (falls back to README)
+codehound clone SRC         # clone a git URL or local repo into ~/repos (--name to rename)
+codehound worktree PATH BR  # add BR as a sibling worktree of PATH (new or existing branch)
 codehound open NAME         # fuzzy-find a project and open it in the first launcher
 codehound janitor           # dry-run: show clones whose remote work is done
 codehound janitor --force   # actually remove them
@@ -107,7 +111,14 @@ the themed icons; editable installs can refresh them with `codehound install-aut
   launcher, open the project, ask a question, copy its path or pin it. Hide the inspector
   with its toolbar toggle to give the table more room.
 - Double-click still opens the first configured launcher. Right-click retains **all
-  launchers**, **Ask AI**, **Open in file manager**, **Adopt into repos…** and **Copy path**.
+  launchers**, **Ask AI**, **Open in file manager**, **Adopt into repos…**,
+  **Add worktree…** and **Copy path**.
+- **New Project…** (header) opens a three-tab dialog: **New project** creates a fresh
+  git repo (README + initial commit, optionally AI-scaffolded when a provider is set),
+  **Clone** takes a git URL, a local path, or a catalogue project, and **Add worktree**
+  branches an existing project into a sibling folder. Each runs the matching CLI command
+  in the background — progress streams into **Activity**, and the new project lands in
+  the catalogue without waiting for a scan.
 - **Scan Now**, **Sync Accounts**, **Settings** and the tray menu remain available.
   **Activity** shows scan/sync/summary output without leaving the catalogue.
 
