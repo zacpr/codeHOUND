@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import discovery
 from .ai import AIError
 from .ai import PROVIDERS as AI_PROVIDERS
 from .ai import validate_base_url
@@ -35,6 +37,29 @@ from .config import Config, save_config
 from .providers import PROVIDERS
 from .providers.azure import AzureAccount
 from .providers.github import GitHubAccount
+
+
+def _pick_detected(parent, title: str, label: str, items: list[str]) -> list[int]:
+    """Show a checklist dialog (all pre-checked); return indices left checked, or [] on Cancel."""
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.resize(480, 320)
+    layout = QVBoxLayout(dlg)
+    layout.addWidget(QLabel(label))
+    listw = QListWidget()
+    for text in items:
+        item = QListWidgetItem(text)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked)
+        listw.addItem(item)
+    layout.addWidget(listw, 1)
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+    buttons.accepted.connect(dlg.accept)
+    buttons.rejected.connect(dlg.reject)
+    layout.addWidget(buttons)
+    if dlg.exec() != QDialog.DialogCode.Accepted:
+        return []
+    return [i for i in range(listw.count()) if listw.item(i).checkState() == Qt.CheckState.Checked]
 
 
 class _GitHubAccountDialog(QDialog):
@@ -273,7 +298,8 @@ class _LaunchersEditor(QWidget):
         remove_btn = QPushButton("Remove")
         up_btn = QPushButton("Move Up")
         down_btn = QPushButton("Move Down")
-        for b in (add_btn, remove_btn, up_btn, down_btn):
+        detect_btn = QPushButton("Detect installed tools…")
+        for b in (add_btn, remove_btn, up_btn, down_btn, detect_btn):
             btns.addWidget(b)
         btns.addStretch(1)
         layout.addLayout(btns)
@@ -282,6 +308,22 @@ class _LaunchersEditor(QWidget):
         remove_btn.clicked.connect(self._remove)
         up_btn.clicked.connect(lambda: self._move(-1))
         down_btn.clicked.connect(lambda: self._move(1))
+        detect_btn.clicked.connect(self._detect)
+
+    def _detect(self):
+        found = discovery.detect_editors(self.values()) + discovery.detect_agent_clis(self.values())
+        if not found:
+            QMessageBox.information(
+                self, "Detect installed tools",
+                "No new editors, file managers or AI agent CLIs were found on PATH."
+            )
+            return
+        labels = [f"{d.name} — {d.command}" for d in found]
+        for i in _pick_detected(
+            self, "Detect installed tools",
+            "Found on this machine. Tick the ones to add as launchers:", labels,
+        ):
+            self._insert_row(self.table.rowCount(), found[i].name, found[i].command)
 
     def _insert_row(self, row: int, name: str = "", cmd: str = ""):
         self.table.insertRow(row)
@@ -388,6 +430,9 @@ class SettingsDialog(QDialog):
         ai_form.addRow("API key:", self.ai_api_key)
         self.ai_base_url = QLineEdit()
         ai_form.addRow("Base URL:", self.ai_base_url)
+        detect_ai_btn = QPushButton("Detect local AI services…")
+        detect_ai_btn.clicked.connect(self._detect_ai)
+        ai_form.addRow(detect_ai_btn)
         self.ai_catalogue_summary = QCheckBox(
             "Model-written catalogue summary — after each scan the model writes a\n"
             "compact digest; catalogue questions answer from it instead of the raw\n"
@@ -477,6 +522,38 @@ class SettingsDialog(QDialog):
         self.ai_api_key.setPlaceholderText(
             f"blank = ${provider.env_key}" if provider.env_key else "not required"
         )
+
+    def _detect_ai(self):
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            found = discovery.detect_model_runners()
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not found:
+            QMessageBox.information(
+                self, "Detect local AI services",
+                "No local AI services (LM Studio, OpenWebUI, text-generation-webui, …) "
+                "were reachable. (Ollama has its own tab.)"
+            )
+            return
+        labels = [
+            f"{r.label} — {r.base_url}" + (f" (model: {r.model})" if r.model else "")
+            for r in found
+        ]
+        picked = _pick_detected(
+            self, "Detect local AI services",
+            "Reachable right now. Pick the one to use for Ask AI:", labels,
+        )
+        if not picked:
+            return
+        chosen = found[picked[0]]
+        idx = self.ai_provider.findData("custom")
+        self.ai_provider.setCurrentIndex(idx if idx >= 0 else 0)
+        self.ai_base_url.setText(chosen.base_url)
+        if chosen.model:
+            self.ai_model.setText(chosen.model)
 
     def _load(self, cfg: Config):
         self.roots.set_values(cfg.roots)
