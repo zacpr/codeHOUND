@@ -40,7 +40,47 @@ CREATE TABLE IF NOT EXISTS kv (
     key             TEXT PRIMARY KEY,
     value           TEXT
 );
+CREATE TABLE IF NOT EXISTS updates (
+    repo          TEXT PRIMARY KEY,     -- owner/repo on GitHub
+    path          TEXT,                 -- local clone path
+    name          TEXT,                 -- catalogue display name
+    current_tag   TEXT,                 -- tag checked out locally ('' = unknown)
+    latest_tag    TEXT,
+    published_at  TEXT,
+    asset_name    TEXT,                 -- best asset for this OS/arch ('' = none)
+    asset_url     TEXT,
+    available     INTEGER DEFAULT 0,    -- newer release exists
+    compatible    INTEGER DEFAULT 0,    -- and an installable asset matched
+    reason        TEXT,                 -- why not compatible / no update
+    auto          INTEGER,              -- NULL = follow default, 1 = auto-install, 0 = never
+    seen          INTEGER DEFAULT 1,
+    last_checked  TEXT,
+    last_install  TEXT,
+    install_mode  TEXT,                 -- managed | inplace | custom ('' = never installed)
+    install_dir   TEXT,                 -- where the current version lives
+    install_exe   TEXT,                 -- executable we manage/symlink
+    prev_dir      TEXT,                 -- previous version dir, for rollback
+    install_path  TEXT,                 -- user-chosen custom install location
+    installed_tag TEXT,                 -- version currently installed by us
+    prev_tag      TEXT,                 -- previous installed version (rollback target)
+    staged_tag    TEXT,                 -- release downloaded + verified, awaiting confirm
+    staged_dir    TEXT                  -- unpacked staging dir for that release
+);
 """
+
+# Columns added after the first release of the updates table — older databases
+# get them ALTERed in on connect.
+_UPDATE_COLUMNS = {
+    "install_mode": "TEXT",
+    "install_dir": "TEXT",
+    "install_exe": "TEXT",
+    "prev_dir": "TEXT",
+    "install_path": "TEXT",
+    "installed_tag": "TEXT",
+    "prev_tag": "TEXT",
+    "staged_tag": "TEXT",
+    "staged_dir": "TEXT",
+}
 
 UPSERT_COLS = [
     "path", "kind", "name", "root", "language", "branch", "remote_url",
@@ -60,7 +100,15 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=15000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    _migrate_updates(conn)
     return conn
+
+
+def _migrate_updates(conn: sqlite3.Connection) -> None:
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(updates)")}
+    for col, decl in _UPDATE_COLUMNS.items():
+        if col not in have:
+            conn.execute(f"ALTER TABLE updates ADD COLUMN {col} {decl}")
 
 
 def upsert_project(conn: sqlite3.Connection, proj: dict) -> None:
@@ -143,6 +191,89 @@ def last_scan(conn: sqlite3.Connection) -> sqlite3.Row | None:
 def kv_get(conn: sqlite3.Connection, key: str) -> str | None:
     row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else None
+
+
+# ----- updates (release watch) -----
+
+def upsert_update(conn: sqlite3.Connection, u: dict) -> None:
+    """Record the latest check result for one watched repo, keeping user flags."""
+    conn.execute(
+        """INSERT INTO updates (repo, path, name, current_tag, latest_tag, published_at,
+                                asset_name, asset_url, available, compatible, reason,
+                                seen, last_checked)
+           VALUES (:repo, :path, :name, :current_tag, :latest_tag, :published_at,
+                   :asset_name, :asset_url, :available, :compatible, :reason,
+                   1, :last_checked)
+           ON CONFLICT(repo) DO UPDATE SET
+               path=excluded.path, name=excluded.name, current_tag=excluded.current_tag,
+               latest_tag=excluded.latest_tag, published_at=excluded.published_at,
+               asset_name=excluded.asset_name, asset_url=excluded.asset_url,
+               available=excluded.available, compatible=excluded.compatible,
+               reason=excluded.reason, last_checked=excluded.last_checked""",
+        u,
+    )
+
+
+def get_update(conn: sqlite3.Connection, repo: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM updates WHERE repo = ?", (repo,)).fetchone()
+
+
+def available_updates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        """SELECT * FROM updates WHERE available = 1
+           ORDER BY published_at DESC, repo"""
+    ).fetchall()
+
+
+def set_update_auto(conn: sqlite3.Connection, repo: str, mode: str | None) -> None:
+    """mode: 'auto' -> 1, 'never' -> 0, 'default'/None -> NULL (follow global)."""
+    value = {"auto": 1, "never": 0}.get(mode)
+    conn.execute("UPDATE updates SET auto = ? WHERE repo = ?", (value, repo))
+
+
+def mark_updates_seen(conn: sqlite3.Connection) -> None:
+    conn.execute("UPDATE updates SET seen = 1 WHERE available = 1")
+
+
+def note_update_install(conn: sqlite3.Connection, repo: str) -> None:
+    conn.execute(
+        "UPDATE updates SET last_install = ?, available = 0, seen = 1 WHERE repo = ?",
+        (now(), repo),
+    )
+
+
+def set_install(conn: sqlite3.Connection, repo: str, *, mode: str, install_dir: str,
+                install_exe: str, prev_dir: str, installed_tag: str,
+                prev_tag: str) -> None:
+    """Record where a repo's app is installed and what to roll back to."""
+    conn.execute(
+        """UPDATE updates SET install_mode=?, install_dir=?, install_exe=?, prev_dir=?,
+                          installed_tag=?, prev_tag=?, last_install=?, available=0, seen=1
+           WHERE repo=?""",
+        (mode, install_dir, install_exe, prev_dir, installed_tag, prev_tag, now(), repo),
+    )
+
+
+def set_update_install_path(conn: sqlite3.Connection, repo: str, path: str) -> None:
+    conn.execute("UPDATE updates SET install_path = ? WHERE repo = ?", (path, repo))
+
+
+def staged_updates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Updates downloaded + verified, waiting to be activated."""
+    return conn.execute(
+        """SELECT * FROM updates WHERE staged_dir IS NOT NULL AND staged_dir != ''
+           ORDER BY published_at DESC, repo"""
+    ).fetchall()
+
+
+def set_staged(conn: sqlite3.Connection, repo: str, staged_tag: str,
+               staged_dir: str) -> None:
+    conn.execute("UPDATE updates SET staged_tag=?, staged_dir=? WHERE repo=?",
+                 (staged_tag, staged_dir, repo))
+
+
+def clear_staged(conn: sqlite3.Connection, repo: str) -> None:
+    conn.execute("UPDATE updates SET staged_tag='', staged_dir='' WHERE repo=?", (repo,))
 
 
 def kv_set(conn: sqlite3.Connection, key: str, value: str) -> None:

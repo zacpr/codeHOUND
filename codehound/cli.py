@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from . import __version__
 from .config import CONFIG_PATH, ensure_config, load_config
@@ -265,9 +266,177 @@ def cmd_detect(args) -> int:
     return 0
 
 
+def cmd_updates(args) -> int:
+    from . import db, updates
+    from .providers.base import SyncError
+
+    cfg = load_config()
+    if not cfg.updates_enabled and not args.force:
+        _say("updates watching is disabled — enable it in config.toml [updates] "
+             "(or pass --force)")
+        return 0
+    conn = db.connect()
+    try:
+        if args.auto:
+            repo = args.auto.lower()
+            if db.get_update(conn, repo) is None:
+                _say(f"{repo} is not on the watch list — it needs a catalogued "
+                     "clone with a GitHub remote")
+                return 1
+            db.set_update_auto(conn, repo, args.mode)
+            conn.commit()
+            state = {"auto": "auto-install", "never": "never auto-install",
+                     "default": "follow the global mode"}[args.mode]
+            _say(f"{repo}: {state}")
+            return 0
+        if args.activate:
+            staged = db.staged_updates(conn)
+            if not staged:
+                _say("nothing staged — run 'codehound updates --check' first")
+                return 0
+            failed = 0
+            for row in staged:
+                if row["repo"] == updates.self_repo(cfg):
+                    _say(f"{row['repo']}: self-update runs with 'codehound self-update'")
+                    continue
+                try:
+                    _say(updates.activate_staged(conn, row["repo"], progress=_say))
+                except SyncError as e:
+                    _say(f"activate: {e}")
+                    failed += 1
+            return 1 if failed else 0
+        if args.check:
+            _say(f"checking GitHub releases for {len(updates.watch_targets(conn))} watched repos…")
+            try:
+                available = updates.check_updates(cfg, conn, progress=_say)
+            except SyncError as e:
+                _say(f"updates: {e}")
+                return 1
+            if updates.self_repo(cfg):
+                updates.check_self_update(cfg, conn, progress=_say)
+                available = db.available_updates(conn)
+            if available and not args.no_auto:
+                installed, newly_staged, _errs = updates.apply_updates(
+                    cfg, conn, progress=_say)
+                if installed:
+                    _say(f"auto-installed {len(installed)} update(s)")
+                if newly_staged:
+                    _say(f"{len(newly_staged)} update(s) staged — confirm with "
+                         "'codehound update REPO' or 'codehound updates --activate'")
+        else:
+            available = db.available_updates(conn)
+        if not available:
+            _say("no updates available" + ("" if args.check else " (run with --check to refresh)"))
+            return 0
+        _say(f"{len(available)} update(s) available:")
+        for row in available:
+            mark = "✓ installable here" if row["compatible"] else f"✗ {row['reason'] or 'no compatible asset'}"
+            have = row["current_tag"] or "unknown"
+            _say(f"  {row['repo']}: {have} → {row['latest_tag']}  [{mark}]")
+            if row["asset_name"]:
+                _say(f"      asset: {row['asset_name']}")
+            if row["installed_tag"]:
+                _say(f"      installed by codeHOUND: {row['installed_tag']} ({row['install_mode']})")
+            if (row["staged_dir"] or "") and Path(row["staged_dir"]).is_dir():
+                _say(f"      staged: {row['staged_tag']} — 'codehound update {row['repo']}' installs it")
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_install_timer(args) -> int:
     from .install import install_timer
     return install_timer(every=args.every)
+
+
+def _resolve_repo(conn, name: str) -> str | None:
+    """owner/repo from an exact match, a repo-name fragment, or fuzzy name."""
+    import difflib
+    rows = conn.execute("SELECT repo, name FROM updates").fetchall()
+    name_l = name.lower()
+    for r in rows:
+        if r["repo"].lower() == name_l:
+            return r["repo"]
+    hits = [r["repo"] for r in rows if name_l in r["repo"].lower()]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        _say(f"{name} is ambiguous: " + ", ".join(sorted(hits)))
+        return None
+    close = difflib.get_close_matches(name_l, [r["repo"].lower() for r in rows], n=1)
+    if close:
+        _say(f"did you mean {close[0]}?")
+    return None
+
+
+def cmd_update(args) -> int:
+    from . import db, updates
+    from .providers.base import SyncError
+
+    conn = db.connect()
+    try:
+        repo = _resolve_repo(conn, args.repo)
+        if repo is None:
+            _say(f"{args.repo} is not on the watch list — run 'codehound updates --check' first")
+            return 1
+        if args.rollback:
+            try:
+                _say(updates.rollback_update(conn, repo, progress=_say))
+            except SyncError as e:
+                _say(f"rollback: {e}")
+                return 1
+            return 0
+        if args.set_path is not None:
+            if args.set_path:
+                p = Path(args.set_path).expanduser()
+                if p.exists() and not p.is_dir() and not p.is_file():
+                    _say(f"{p} is not a file or directory")
+                    return 1
+            db.set_update_install_path(conn, repo, args.set_path)
+            conn.commit()
+            _say(f"{repo}: custom install location "
+                 + (f"set to {args.set_path}" if args.set_path else "cleared"))
+            return 0
+        try:
+            row = db.get_update(conn, repo)
+            if repo == updates.self_repo(cfg):
+                _say(f"{repo} is codeHOUND itself — use 'codehound self-update' "
+                     "(it quits and swaps the running app)")
+                return 1
+            staged = (row["staged_dir"] or "") if row else ""
+            if not args.system and staged and not args.exe \
+                    and Path(staged).is_dir() \
+                    and row["staged_tag"] == row["latest_tag"]:
+                # already downloaded + verified — just move it into place
+                _say(updates.activate_staged(conn, repo, progress=_say))
+            elif args.system:
+                _say(updates.system_package_install(cfg, conn, repo, progress=_say))
+            else:
+                _say(updates.install_update(cfg=load_config(), conn=conn, repo=repo,
+                                            progress=_say, exe_name=args.exe))
+        except SyncError as e:
+            _say(f"update: {e}")
+            return 1
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_self_update(args) -> int:
+    from . import db, updates
+    from .providers.base import SyncError
+
+    cfg = load_config()
+    conn = db.connect()
+    try:
+        _say(updates.self_update(cfg, conn, progress=_say,
+                                 stage_only=args.stage))
+        return 0
+    except SyncError as e:
+        _say(f"self-update: {e}")
+        return 1
+    finally:
+        conn.close()
 
 
 def cmd_install_autostart(args) -> int:
@@ -337,6 +506,33 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("detect", help="detect installed editors, AI agent CLIs, and local AI services")
     p.set_defaults(func=cmd_detect)
+
+    p = sub.add_parser("updates", help="check GitHub releases of watched repos for updates")
+    p.add_argument("--check", action="store_true", help="refresh from GitHub first")
+    p.add_argument("--force", action="store_true", help="run even if watching is disabled")
+    p.add_argument("--auto", metavar="REPO", help="set auto-install mode for owner/repo")
+    p.add_argument("--mode", choices=["auto", "never", "default"], default="default",
+                   help="mode for --auto (default: follow global)")
+    p.add_argument("--activate", action="store_true",
+                   help="install every staged (downloaded + verified) update")
+    p.add_argument("--no-auto", action="store_true",
+                   help="with --check, skip the auto-update policy pass")
+    p.set_defaults(func=cmd_updates)
+
+    p = sub.add_parser("update", help="install (or roll back) a watched repo's latest release")
+    p.add_argument("repo", help="owner/repo (or a name fragment) on the watch list")
+    p.add_argument("--rollback", action="store_true", help="restore the previously installed version")
+    p.add_argument("--exe", help="executable name inside the asset, when it can't be guessed")
+    p.add_argument("--set-path", metavar="PATH",
+                   help="install this repo here instead (blank clears the override)")
+    p.add_argument("--system", action="store_true",
+                   help="install an RPM/DEB system-wide via pkexec instead of user-land")
+    p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser("self-update", help="update codeHOUND itself from its own releases")
+    p.add_argument("--stage", action="store_true",
+                   help="download + verify only, don't install")
+    p.set_defaults(func=cmd_self_update)
 
     p = sub.add_parser("install-timer", help="install + enable the systemd user scan timer")
     p.add_argument("--every", default="6h", help="scan interval (systemd time span, default 6h)")

@@ -6,7 +6,6 @@ configured clone destination.
 """
 from __future__ import annotations
 
-import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +13,7 @@ from pathlib import Path
 from . import providers
 from .config import Config
 from .providers.base import CleanupCandidate, RemoteRepo, SyncError
+from .safepath import UnsafePathError, safe_rmtree
 
 
 @dataclass
@@ -102,10 +102,10 @@ def run(cfg: Config, dry_run: bool = True, progress=print) -> JanitorResult:
             progress(f"  would remove {rel}  ({reason})")
         else:
             try:
-                shutil.rmtree(path)
+                safe_rmtree(path, (cfg.clone_dest,), f"janitor {rel}")
                 result.removed.append(path)
                 progress(f"  removed {rel}  ({reason})")
-            except OSError as e:
+            except (OSError, UnsafePathError) as e:
                 result.errors.append(f"{rel}: {e}")
                 progress(f"  FAILED {rel}: {e}")
     return result

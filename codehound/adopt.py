@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import db
 from .config import Config
+from .safepath import safe_rmtree
 
 
 def suggest_name(cfg: Config, src: str) -> str:
@@ -45,7 +46,7 @@ def adopt(cfg: Config, src: str, name: str, progress=None) -> str:
             capture_output=True, text=True,
         )
         if r.returncode != 0:
-            shutil.rmtree(dest, ignore_errors=True)
+            safe_rmtree(dest, (dest_dir,), "adopt rollback")
             raise RuntimeError(f"rsync failed: {r.stderr.strip()[:500]}")
     else:
         shutil.copytree(src, dest, symlinks=True)

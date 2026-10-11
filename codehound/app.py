@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -283,6 +285,9 @@ class Dashboard(QMainWindow):
         self._sync_proc: QProcess | None = None
         self._digest_proc: QProcess | None = None
         self._new_proc: QProcess | None = None
+        self._updates_proc: QProcess | None = None
+        self._staged_count = 0
+        self.tray = None   # set by run_app() once the tray icon exists
         self._view = "all"
         self._pinned_paths = self._load_pins()
         self._featured: list[dict] = []
@@ -452,6 +457,7 @@ class Dashboard(QMainWindow):
         self.search.textChanged.connect(self._filter_changed)
         self.scan_btn.clicked.connect(self.start_scan)
         self.sync_btn.clicked.connect(self.start_sync)
+        self.updates_btn.clicked.connect(self.start_updates)
         self.ask_btn.clicked.connect(self.ask_ai)
         self.new_btn.clicked.connect(self.new_project)
         reload_btn.clicked.connect(self.reload)
@@ -509,6 +515,9 @@ class Dashboard(QMainWindow):
         layout.addStretch()
         self.sync_btn = QPushButton("Sync Accounts")
         layout.addWidget(self.sync_btn)
+        self.updates_btn = QPushButton("Check Updates")
+        self.updates_btn.setToolTip("Look for newer GitHub releases of watched projects")
+        layout.addWidget(self.updates_btn)
         self.activity_btn = QPushButton("Activity")
         layout.addWidget(self.activity_btn)
         settings = QPushButton("Settings")
@@ -955,6 +964,43 @@ class Dashboard(QMainWindow):
     def start_sync(self):
         self._start_cli("_sync_proc", ["sync"], self.sync_btn, "Syncing…", "Sync Accounts")
 
+    def start_updates(self):
+        self._start_cli("_updates_proc", ["updates", "--check"],
+                        self.updates_btn, "Checking…", "Check Updates")
+
+    def start_self_update(self):
+        """Update codeHOUND itself, then quit and come back on the new build."""
+        if self._updates_proc is not None:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Update codeHOUND")
+        box.setText("Update codeHOUND to its newest release?\n\n"
+                    "A system package install will ask for admin rights (pkexec). "
+                    "codeHOUND quits and restarts on the new version once the "
+                    "install finishes.")
+        box.setStandardButtons(QMessageBox.StandardButton.Yes
+                               | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        self._start_cli("_updates_proc", ["self-update"], self.updates_btn,
+                        "Updating…", "Check Updates")
+
+    def _relaunch_after_self_update(self):
+        """Hand the restart to a detached helper, then quit so it can run."""
+        from . import updates
+        try:
+            updates.schedule_relaunch(
+                when_pid=os.getpid(),
+                launch=[sys.executable, "-m", "codehound.cli", "app"],
+                progress=lambda m: self._task_output(m))
+        except OSError as e:
+            self._task_output(f"relaunch failed: {e} — start codeHOUND again manually")
+            return
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
     def new_project(self, default_tab: int = 0):
         dlg = NewProjectDialog(self.cfg, self, default_tab, self._selected_path())
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -987,6 +1033,48 @@ class Dashboard(QMainWindow):
         if code != 0:
             self.activity_dock.show()
             self.statusBar().showMessage(f"{what} exited with code {code} — see Activity")
+        elif what == "updates":
+            self._notify_updates()
+        elif what == "self-update":
+            self._relaunch_after_self_update()
+
+    def _notify_updates(self):
+        """Bubble a tray message when an update check found something new.
+
+        Updates the auto policy staged (downloaded + verified) get a
+        click-to-install message; `activate_staged` installs them."""
+        try:
+            conn = db.connect()
+            try:
+                rows = db.available_updates(conn)
+                staged = db.staged_updates(conn)
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return
+        self._staged_count = sum(1 for r in staged if (r["staged_dir"] or ""))
+        if not rows:
+            self.statusBar().showMessage("updates: everything is current")
+            return
+        first = rows[0]
+        text = (f"{first['name'] or first['repo']} {first['latest_tag']} is available "
+                f"(you have {first['current_tag'] or 'unknown'})")
+        if len(rows) > 1:
+            text += f" · +{len(rows) - 1} more"
+        if self._staged_count:
+            text += " — click to install"
+        self.statusBar().showMessage(f"{len(rows)} update(s) available — see Activity")
+        if self.tray is not None:
+            self.tray.showMessage("codeHOUND — updates", text,
+                                  QSystemTrayIcon.MessageIcon.Information, 8000)
+
+    def activate_staged(self):
+        """Tray message click: install the updates staging already verified."""
+        if not self._staged_count or self._updates_proc is not None:
+            return
+        self._staged_count = 0
+        self._start_cli("_updates_proc", ["updates", "--activate"],
+                        self.updates_btn, "Installing…", "Check Updates")
 
     # ----- actions -----
     def open_settings(self):
@@ -1166,6 +1254,8 @@ def run_app() -> int:
         ask_act.setToolTip("Configure an AI provider in Settings → AI first")
     if ai_ready and win.cfg.ai_catalogue_summary:
         menu.addAction("Refresh AI summary").triggered.connect(win.refresh_digest)
+    if (win.cfg.self_repo or "").strip():
+        menu.addAction("Update codeHOUND…").triggered.connect(win.start_self_update)
     menu.addAction("Settings…").triggered.connect(win.open_settings)
     menu.addSeparator()
     menu.addAction("Quit").triggered.connect(app.quit)
@@ -1181,7 +1271,10 @@ def run_app() -> int:
                 win.activateWindow()
 
     tray.activated.connect(on_activated)
+    # clicking an update notification activates (installs) the staged updates
+    tray.messageClicked.connect(win.activate_staged)
     tray.show()
+    win.tray = tray
 
     win.show()
     return app.exec()
