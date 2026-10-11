@@ -204,6 +204,39 @@ class DashboardTests(unittest.TestCase):
         self.app.processEvents()
         self.assertFalse(self.win.metrics_panel.isHidden())
 
+    def test_update_column_filter_and_install_button(self):
+        # nothing pending at start: Install Updates is disabled
+        self.assertFalse(self.win.install_updates_btn.isEnabled())
+        self.assertEqual(self.win.model.updates_count(), 0)
+        conn = db.connect()
+        try:
+            db.upsert_update(conn, {
+                "repo": "zacpr/project-0", "path": "/projects/project-0",
+                "name": "Project 0", "current_tag": "v1.0.0",
+                "latest_tag": "v1.1.0",
+                "published_at": "2026-10-01T00:00:00+00:00",
+                "asset_name": "app.AppImage",
+                "asset_url": "https://example.org/app.AppImage",
+                "available": 1, "compatible": 1, "reason": "",
+                "last_checked": "2026-10-02T00:00:00+00:00",
+            })
+            conn.commit()
+        finally:
+            conn.close()
+        self.win.reload()
+        self.assertEqual(self.win.model.updates_count(), 1)
+        self.assertTrue(self.win.install_updates_btn.isEnabled())
+        self.select("/projects/project-0")
+        row = next(r for r in range(self.win.proxy.rowCount())
+                   if self.win.proxy.index(r, 0).data(PATH_ROLE) == "/projects/project-0")
+        self.assertEqual(self.win.proxy.index(row, 6).data(), "⬆ v1.1.0")
+        self.win.updates_filter.click()
+        self.assertEqual(self.win.proxy.rowCount(), 1)
+        self.assertEqual(self.win.proxy.index(0, 0).data(PATH_ROLE), "/projects/project-0")
+        self.win._reset_filters()
+        self.assertEqual(self.win.proxy.rowCount(), 8)
+        self.assertFalse(self.win.updates_filter.isChecked())
+
     def test_cody_icon_installation_replaces_legacy_icon(self):
         root = Path(self.temp.name) / "icons"
         old = root / "scalable/apps/codehound.svg"

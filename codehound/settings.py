@@ -503,6 +503,50 @@ class SettingsDialog(QDialog):
         janitor_layout.addWidget(run_btn)
         tabs.addTab(janitor_tab, "Janitor")
 
+        # --- Updates ---
+        updates_tab = QWidget()
+        updates_form = QFormLayout(updates_tab)
+        updates_form.addRow(QLabel(
+            "Watches GitHub releases for catalogued projects and offers to\n"
+            "install newer ones (Check Updates / Install Updates in the app,\n"
+            "or `codehound updates` on the command line)."
+        ))
+        self.updates_enabled = QCheckBox("Watch for updates")
+        updates_form.addRow(self.updates_enabled)
+        self.updates_mode = QComboBox()
+        self.updates_mode.addItem("Ask before installing (stage + confirm)", "stage")
+        self.updates_mode.addItem("Install automatically, notify after", "silent")
+        updates_form.addRow("When an update appears:", self.updates_mode)
+        self.updates_own_only = QCheckBox(
+            "Only repos I own myself — skip orgs and forks"
+        )
+        self.updates_own_only.setToolTip(
+            "Needs a GitHub login (gh CLI or a token in Settings → Accounts) to\n"
+            "tell your repos from everyone else's. Unauthenticated falls back\n"
+            "to watching every catalogued GitHub project."
+        )
+        updates_form.addRow(self.updates_own_only)
+        install_dir_row = QHBoxLayout()
+        self.updates_install_dir = QLineEdit()
+        self.updates_install_dir.setPlaceholderText(
+            "default — replace in place, else a managed dir with a ~/.local/bin link")
+        browse_upd = QPushButton("Browse…")
+        browse_upd.clicked.connect(partial(self._browse_into, self.updates_install_dir,
+                                           "Default install location for updates"))
+        install_dir_row.addWidget(self.updates_install_dir, 1)
+        install_dir_row.addWidget(browse_upd)
+        install_dir_holder = QWidget()
+        install_dir_holder.setLayout(install_dir_row)
+        updates_form.addRow("Default install location:", install_dir_holder)
+        self.self_repo = QLineEdit()
+        self.self_repo.setPlaceholderText("owner/repo — blank turns self-updating off")
+        self.self_repo.setToolTip("codeHOUND keeps itself current from this repo")
+        updates_form.addRow("codeHOUND updates from:", self.self_repo)
+        updates_form.addRow(QLabel(
+            "Per-app overrides: right-click a project row → Update Settings…"
+        ))
+        tabs.addTab(updates_tab, "Updates")
+
         # --- buttons ---
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -579,6 +623,12 @@ class SettingsDialog(QDialog):
         self.janitor_enabled.setChecked(cfg.janitor_enabled)
         self.janitor_exclude.set_values(cfg.janitor_exclude)
         self.adopt_dest.setText(cfg.adopt_dest)
+        self.updates_enabled.setChecked(cfg.updates_enabled)
+        idx = self.updates_mode.findData(cfg.updates_mode)
+        self.updates_mode.setCurrentIndex(idx if idx >= 0 else 0)
+        self.updates_own_only.setChecked(cfg.updates_own_only)
+        self.updates_install_dir.setText(cfg.updates_install_dir)
+        self.self_repo.setText(cfg.self_repo)
 
     def _browse_into(self, target: QLineEdit, title: str):
         path = QFileDialog.getExistingDirectory(self, title, target.text())
@@ -653,6 +703,11 @@ class SettingsDialog(QDialog):
             ai_catalogue_summary=self.ai_catalogue_summary.isChecked(),
             janitor_enabled=self.janitor_enabled.isChecked(),
             janitor_exclude=self.janitor_exclude.values(),
+            updates_enabled=self.updates_enabled.isChecked(),
+            updates_mode=self.updates_mode.currentData(),
+            updates_own_only=self.updates_own_only.isChecked(),
+            updates_install_dir=self.updates_install_dir.text().strip(),
+            self_repo=self.self_repo.text().strip(),
         )
         save_config(cfg)
         self.accept()

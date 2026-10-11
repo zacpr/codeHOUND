@@ -188,6 +188,8 @@ class _Cfg:
     accounts: dict = {}
     updates_enabled = True
     updates_mode = "stage"
+    updates_own_only = False
+    updates_install_dir = ""
 
 
 class CheckUpdatesTests(unittest.TestCase):
@@ -244,6 +246,72 @@ class CheckUpdatesTests(unittest.TestCase):
             check_updates(_Cfg(), self.conn, progress=lambda m: None)
         self.assertEqual(db.get_update(self.conn, "zacpr/appX")["reason"],
                          "no published releases")
+
+
+class OwnOnlyWatchTests(unittest.TestCase):
+    """own_only watches repos the authed user owns — not orgs, not forks."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        patcher = patch("codehound.db.DB_PATH", Path(self.temp.name) / "cat.db")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.conn = db.connect()
+        self.addCleanup(self.conn.close)
+        for repo in ("zacpr/mine", "zacpr/old-fork", "someorg/theirs"):
+            db.upsert_project(self.conn, {
+                "path": f"/r/{repo.split('/')[1]}", "name": repo, "root": "/r",
+                "kind": "git", "remote_url": f"https://github.com/{repo}.git",
+                "language": None, "branch": None, "last_commit_date": None,
+                "last_commit_msg": None, "dirty": 0, "created": None,
+                "modified": None, "size_approx": None})
+        self.conn.commit()
+
+    def _api(self, cfg, path):
+        if path == "user":
+            return {"login": "zacpr"}
+        if path.endswith("/releases?per_page=10"):
+            return [{"tag_name": "v9.9.9", "draft": False, "prerelease": False,
+                     "published_at": "2026-10-01T00:00:00Z",
+                     "assets": [_asset("mine-v9.9.9-x86_64.AppImage")]}]
+        if path in ("repos/zacpr/mine", "repos/zacpr/old-fork"):
+            return {"fork": path.endswith("old-fork")}
+        raise AssertionError(f"unexpected API call: {path}")
+
+    def test_own_only_keeps_only_own_non_forks(self):
+        cfg = _Cfg()
+        cfg.updates_own_only = True
+        with patch("codehound.updates._api_get", side_effect=self._api), \
+                patch("codehound.updates.local_tag", lambda p: "v1.0.0"):
+            check_updates(cfg, self.conn, progress=lambda m: None)
+        watched = {r["repo"] for r in
+                   self.conn.execute("SELECT repo FROM updates").fetchall()}
+        self.assertEqual(watched, {"zacpr/mine"})
+
+    def test_own_only_off_watches_everything(self):
+        with patch("codehound.updates._api_get", side_effect=self._api), \
+                patch("codehound.updates.local_tag", lambda p: "v1.0.0"):
+            check_updates(_Cfg(), self.conn, progress=lambda m: None)
+        watched = {r["repo"] for r in
+                   self.conn.execute("SELECT repo FROM updates").fetchall()}
+        self.assertEqual(watched, {"zacpr/mine", "zacpr/old-fork", "someorg/theirs"})
+
+    def test_unauthenticated_falls_back_to_all(self):
+        from codehound.providers.base import SyncError
+
+        def deny(cfg, path):
+            if path == "user":
+                raise SyncError("HTTP 401")
+            return self._api(cfg, path)
+        cfg = _Cfg()
+        cfg.updates_own_only = True
+        with patch("codehound.updates._api_get", side_effect=deny), \
+                patch("codehound.updates.local_tag", lambda p: "v1.0.0"):
+            check_updates(cfg, self.conn, progress=lambda m: None)
+        watched = {r["repo"] for r in
+                   self.conn.execute("SELECT repo FROM updates").fetchall()}
+        self.assertEqual(len(watched), 3)
 
 
 # ---------------------------------------------------------------- phase 2

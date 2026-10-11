@@ -88,9 +88,14 @@ exclude = []            # repo names or full paths the janitor must never touch
 # Per-repo override: codehound updates --auto <repo> (auto / never / default).
 # self_repo: codeHOUND keeps itself on the watch list and self-updates from it
 # (`codehound self-update`); set it blank to turn self-updating off.
+# own_only: only watch repos you own yourself (not forks, not orgs you merely belong to).
+# install_dir: default place to install updates that can't replace in place
+# (blank = a managed dir under ~/.local/share/codehound with a ~/.local/bin link).
 [updates]
 enabled = true
 mode = "stage"
+own_only = true
+install_dir = ""
 self_repo = "zacpr/codeHOUND"
 
 # Accounts mirrored by `codehound sync` (also editable in the app's Settings → Accounts).
@@ -135,6 +140,8 @@ class Config:
     janitor_exclude: list[str] = field(default_factory=list)
     updates_enabled: bool = True
     updates_mode: str = "stage"   # "stage" = confirm before activating, "silent" = auto-install
+    updates_own_only: bool = True  # watch only repos you own (not forks, not orgs)
+    updates_install_dir: str = ""  # default custom install dir for updates (blank = replace in place)
     self_repo: str = "zacpr/codeHOUND"  # owner/repo codeHOUND self-updates from (blank = off)
 
 
@@ -215,6 +222,8 @@ exclude = {_toml_list(cfg.janitor_exclude)}            # repo names or full path
 [updates]
 enabled = {str(cfg.updates_enabled).lower()}
 mode = {_toml_str(cfg.updates_mode)}   # "stage" = confirm before activating, "silent" = auto-install
+own_only = {str(cfg.updates_own_only).lower()}   # watch only repos you own (not forks, not orgs)
+install_dir = {_toml_str(cfg.updates_install_dir)}   # default install dir for updates (blank = replace in place)
 self_repo = {_toml_str(cfg.self_repo)}   # codeHOUND self-updates from this repo (blank = off)
 {accounts}
 """
@@ -263,5 +272,7 @@ def load_config() -> Config:
         janitor_exclude=list(janitor.get("exclude", [])),
         updates_enabled=updates.get("enabled", True),
         updates_mode=updates.get("mode", "stage"),
+        updates_own_only=updates.get("own_only", True),
+        updates_install_dir=updates.get("install_dir", ""),
         self_repo=updates.get("self_repo", "zacpr/codeHOUND"),
     )

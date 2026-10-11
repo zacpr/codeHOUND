@@ -306,10 +306,43 @@ def cmd_updates(args) -> int:
                     _say(f"{row['repo']}: self-update runs with 'codehound self-update'")
                     continue
                 try:
-                    _say(updates.activate_staged(conn, row["repo"], progress=_say))
+                    _say(updates.activate_staged(conn, row["repo"], progress=_say,
+                                                 default_path=cfg.updates_install_dir))
                 except SyncError as e:
                     _say(f"activate: {e}")
                     failed += 1
+            return 1 if failed else 0
+        if args.install_all:
+            # Install every available, compatible update — one explicit run the
+            # user asked for (the dashboard's Install Updates button).
+            rows = [r for r in db.available_updates(conn)
+                    if r["repo"] != updates.self_repo(cfg)]
+            if not rows:
+                _say("no updates to install — run 'codehound updates --check' first")
+                return 0
+            installed = 0
+            failed = 0
+            for row in rows:
+                if not row["compatible"] or not (row["asset_name"] or "").lower().endswith(
+                        tuple(updates._INSTALLABLE)):
+                    _say(f"{row['repo']}: skipped — {row['reason'] or 'no compatible asset'}")
+                    failed += 1
+                    continue
+                try:
+                    staged = row["staged_dir"] or ""
+                    if (not args.exe and staged and Path(staged).is_dir()
+                            and row["staged_tag"] == row["latest_tag"]):
+                        _say(updates.activate_staged(conn, row["repo"], progress=_say,
+                                                     default_path=cfg.updates_install_dir))
+                    else:
+                        _say(updates.install_update(cfg, conn, row["repo"],
+                                                    progress=_say, exe_name=args.exe))
+                    installed += 1
+                except SyncError as e:
+                    _say(f"{row['repo']}: {e}")
+                    failed += 1
+            _say(f"installed {installed} update(s)"
+                 + (f", {failed} failed" if failed else ""))
             return 1 if failed else 0
         if args.check:
             _say(f"checking GitHub releases for {len(updates.watch_targets(conn))} watched repos…")
@@ -379,6 +412,7 @@ def cmd_update(args) -> int:
     from . import db, updates
     from .providers.base import SyncError
 
+    cfg = load_config()
     conn = db.connect()
     try:
         repo = _resolve_repo(conn, args.repo)
@@ -414,11 +448,12 @@ def cmd_update(args) -> int:
                     and Path(staged).is_dir() \
                     and row["staged_tag"] == row["latest_tag"]:
                 # already downloaded + verified — just move it into place
-                _say(updates.activate_staged(conn, repo, progress=_say))
+                _say(updates.activate_staged(conn, repo, progress=_say,
+                                             default_path=cfg.updates_install_dir))
             elif args.system:
                 _say(updates.system_package_install(cfg, conn, repo, progress=_say))
             else:
-                _say(updates.install_update(cfg=load_config(), conn=conn, repo=repo,
+                _say(updates.install_update(cfg=cfg, conn=conn, repo=repo,
                                             progress=_say, exe_name=args.exe))
         except SyncError as e:
             _say(f"update: {e}")
@@ -521,6 +556,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="mode for --auto (default: follow global)")
     p.add_argument("--activate", action="store_true",
                    help="install every staged (downloaded + verified) update")
+    p.add_argument("--install-all", action="store_true",
+                   help="install every available compatible update (skips codeHOUND itself)")
     p.add_argument("--no-auto", action="store_true",
                    help="with --check, skip the auto-update policy pass")
     p.set_defaults(func=cmd_updates)
