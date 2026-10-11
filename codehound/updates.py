@@ -1044,6 +1044,17 @@ def check_updates(cfg, conn: sqlite3.Connection, progress=print) -> list[sqlite3
                      "watching every catalogued repo (add a token in "
                      "Settings → Accounts or log in with gh)")
     mine = self_repo(cfg)
+    # Rows from earlier checks can outlive their watch — a repo un-catalogued,
+    # forked, or transferred since the last run would keep showing as an
+    # available update. Drop anything this check no longer watches (the
+    # self-update row belongs to check_self_update, not to this list).
+    keep = {t.repo for t in targets} | {mine}
+    existing = [r["repo"] for r in conn.execute("SELECT repo FROM updates").fetchall()]
+    stale = [repo for repo in existing if repo not in keep]
+    for repo in stale:
+        conn.execute("DELETE FROM updates WHERE repo = ?", (repo,))
+    if stale:
+        progress(f"  dropped {len(stale)} update row(s) no longer on the watch list")
     for t in targets:
         if t.repo == mine:
             continue   # codeHOUND's own row is owned by check_self_update

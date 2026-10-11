@@ -313,6 +313,45 @@ class OwnOnlyWatchTests(unittest.TestCase):
                    self.conn.execute("SELECT repo FROM updates").fetchall()}
         self.assertEqual(len(watched), 3)
 
+    def test_own_only_prunes_stale_rows_from_earlier_checks(self):
+        # A row left over from a run before own_only existed (or after the
+        # repo was un-catalogued) must not linger in the updates table.
+        db.upsert_update(self.conn, {
+            "repo": "Niko1221/Strata", "path": "/r/strata", "name": "Strata",
+            "current_tag": "v1.0.0", "latest_tag": "v2.0.0",
+            "published_at": "2026-10-01T00:00:00Z", "asset_name": "s.AppImage",
+            "asset_url": "https://example.org/s.AppImage", "available": 1,
+            "compatible": 1, "reason": "", "last_checked": "2026-10-01T00:00:00Z"})
+        self.conn.commit()
+        cfg = _Cfg()
+        cfg.updates_own_only = True
+        with patch("codehound.updates._api_get", side_effect=self._api), \
+                patch("codehound.updates.local_tag", lambda p: "v1.0.0"):
+            check_updates(cfg, self.conn, progress=lambda m: None)
+        watched = {r["repo"] for r in
+                   self.conn.execute("SELECT repo FROM updates").fetchall()}
+        self.assertEqual(watched, {"zacpr/mine"})
+        self.assertEqual(
+            [r["repo"] for r in db.available_updates(self.conn)], ["zacpr/mine"])
+
+    def test_self_update_row_survives_pruning(self):
+        cfg = _Cfg()
+        cfg.updates_own_only = True
+        cfg.self_repo = "zacpr/codeHOUND"
+        db.upsert_update(self.conn, {
+            "repo": "zacpr/codeHOUND", "path": None, "name": "codeHOUND",
+            "current_tag": "v0.5.1.0", "latest_tag": "v0.5.2.0",
+            "published_at": "2026-10-01T00:00:00Z", "asset_name": "c.rpm",
+            "asset_url": "https://example.org/c.rpm", "available": 1,
+            "compatible": 1, "reason": "", "last_checked": "2026-10-01T00:00:00Z"})
+        self.conn.commit()
+        with patch("codehound.updates._api_get", side_effect=self._api), \
+                patch("codehound.updates.local_tag", lambda p: "v1.0.0"):
+            check_updates(cfg, self.conn, progress=lambda m: None)
+        watched = {r["repo"] for r in
+                   self.conn.execute("SELECT repo FROM updates").fetchall()}
+        self.assertEqual(watched, {"zacpr/mine", "zacpr/codeHOUND"})
+
 
 # ---------------------------------------------------------------- phase 2
 

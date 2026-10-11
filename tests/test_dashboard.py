@@ -237,6 +237,34 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(self.win.proxy.rowCount(), 8)
         self.assertFalse(self.win.updates_filter.isChecked())
 
+    def test_update_settings_in_context_menu_without_available_update(self):
+        # A GitHub project with no release row yet must still offer Update
+        # Settings; a non-GitHub project must not.
+        conn = db.connect()
+        try:
+            conn.execute(
+                "UPDATE projects SET remote_url = "
+                "'https://github.com/zacpr/project-2.git' WHERE path = '/projects/project-2'")
+            conn.commit()
+        finally:
+            conn.close()
+        self.win.reload()
+
+        def menu_titles(path):
+            self.select(path)
+            row = next(r for r in range(self.win.proxy.rowCount())
+                       if self.win.proxy.index(r, 0).data(PATH_ROLE) == path)
+            rect = self.win.table.visualRect(self.win.proxy.index(row, 0))
+            menu = self.win._build_context_menu(rect.center())
+            self.assertIsNotNone(menu)
+            return [a.text() for a in menu.actions()]
+
+        titles = menu_titles("/projects/project-2")
+        self.assertIn("Update Settings…", titles)
+        self.assertNotIn("Install Update — v1.1.0", titles)
+        # project-0 has a remote, but not a GitHub one
+        self.assertNotIn("Update Settings…", menu_titles("/projects/project-0"))
+
     def test_cody_icon_installation_replaces_legacy_icon(self):
         root = Path(self.temp.name) / "icons"
         old = root / "scalable/apps/codehound.svg"

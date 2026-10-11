@@ -286,10 +286,12 @@ class NewProjectDialog(QDialog):
 class _UpdateSettingsDialog(QDialog):
     """Per-app update settings: custom install location + install policy."""
 
-    def __init__(self, cfg, repo: str, name: str, parent=None):
+    def __init__(self, cfg, repo: str, name: str, path: str = "", parent=None):
         super().__init__(parent)
         self.cfg = cfg
         self.repo = repo
+        self.name = name
+        self.path = path
         self.setWindowTitle(f"Update Settings — {name or repo}")
         form = QFormLayout(self)
         conn = db.connect()
@@ -338,6 +340,15 @@ class _UpdateSettingsDialog(QDialog):
     def _save(self):
         conn = db.connect()
         try:
+            if db.get_update(conn, self.repo) is None:
+                # Settings chosen before the first release check — seed the
+                # watch row so the flags have somewhere to live.
+                db.upsert_update(conn, {
+                    "repo": self.repo, "path": self.path, "name": self.name,
+                    "current_tag": "", "latest_tag": None, "published_at": None,
+                    "asset_name": None, "asset_url": None, "available": 0,
+                    "compatible": 0, "reason": "not checked yet",
+                    "last_checked": None})
             db.set_update_install_path(conn, self.repo, self.install_path.text().strip())
             db.set_update_auto(conn, self.repo, self.policy.currentData())
             conn.commit()
@@ -1107,11 +1118,22 @@ class Dashboard(QMainWindow):
         self._start_cli("_updates_proc", ["update", repo],
                         self.updates_btn, "Installing…", "Check Updates")
 
-    def _update_settings(self, repo: str, name: str):
-        dlg = _UpdateSettingsDialog(self.cfg, repo, name, self)
+    def _update_settings(self, repo: str, name: str, path: str = ""):
+        dlg = _UpdateSettingsDialog(self.cfg, repo, name, path, self)
         if dlg.exec() == _UpdateSettingsDialog.DialogCode.Accepted:
             self.reload()
             self.statusBar().showMessage(f"update settings saved for {repo}")
+
+    def _watch_repo(self, proj: dict | None, update: dict | None) -> str:
+        """Repo whose update settings apply: the watched row's when one
+        exists, else the project's GitHub remote ('' = not watchable)."""
+        if update:
+            return update["repo"]
+        if not proj:
+            return ""
+        from .updates import parse_github_repo
+        repo = parse_github_repo(proj.get("remote_url") or "") or ""
+        return "" if repo == self.cfg.self_repo else repo
 
     def _set_update_button_state(self, n_updates: int):
         """Install Updates is only enabled when something is pending."""
@@ -1268,10 +1290,15 @@ class Dashboard(QMainWindow):
             launchers.launch(self.cfg, names[0], path)
 
     def _context_menu(self, pos):
+        menu = self._build_context_menu(pos)
+        if menu is not None:
+            menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _build_context_menu(self, pos) -> QMenu | None:
         index = self.table.indexAt(pos)
         path = self._selected_path(index)
         if not path:
-            return
+            return None
         menu = QMenu(self)
         for name in launchers.launcher_names(self.cfg):
             act = menu.addAction(f"Open in {name}")
@@ -1290,12 +1317,13 @@ class Dashboard(QMainWindow):
             act.triggered.connect(
                 lambda _=False, r=update["repo"]: self._install_one_update(r)
             )
-        if proj and update:
+        watch_repo = self._watch_repo(proj, update)
+        if proj and watch_repo:
             act = menu.addAction("Update Settings…")
             act.setToolTip("Per-app install path and auto-install policy")
             act.triggered.connect(
-                lambda _=False, r=update["repo"], n=proj["name"]:
-                self._update_settings(r, n)
+                lambda _=False, r=watch_repo, n=proj["name"], p=proj["path"]:
+                self._update_settings(r, n, p)
             )
         from .ai import is_configured
         ask_menu = menu.addMenu("Ask AI")
@@ -1318,7 +1346,7 @@ class Dashboard(QMainWindow):
         menu.addAction("Copy path").triggered.connect(
             lambda: QGuiApplication.clipboard().setText(path)
         )
-        menu.exec(self.table.viewport().mapToGlobal(pos))
+        return menu
 
     # ----- Ask AI -----
     def _show_answer(self, cli_args: list[str], title: str, note: str = ""):
