@@ -1,5 +1,5 @@
 Name:           codehound
-Version:        0.5.1.0
+Version:        0.5.1.1
 Release:        1%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
@@ -79,6 +79,15 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Mon Oct 12 2026 zacpr <zac@ashurtech.net> - 0.5.1.1-1
+- Updates: repos no longer on the watch list (un-catalogued, forked,
+  transferred, or filtered out by own-only) are pruned from the
+  updates table on the next check, so stale non-owned repos stop
+  showing as available updates.
+- Context menu: 'Update Settings…' now appears for any project with a
+  GitHub remote, not only those with an update pending; settings saved
+  before the first check seed the watch row.
+
 * Mon Oct 12 2026 zacpr <zac@ashurtech.net> - 0.5.1.0-1
 - Dashboard: update visibility and one-click installs. New 'Release
   Updated' column with glowing highlight for apps with a newer
