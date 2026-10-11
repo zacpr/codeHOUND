@@ -81,6 +81,7 @@ codehound janitor           # dry-run: show clones whose remote work is done
 codehound janitor --force   # actually remove them
 codehound updates           # list known updates for watched GitHub repos
 codehound updates --check   # refresh from the GitHub API first, then list
+codehound updates --activate # install everything staged (downloaded + verified)
 codehound update REPO       # download + install the newest release of REPO
 codehound update REPO --rollback   # put the previous version back
 ```
@@ -163,7 +164,8 @@ can also edit by hand (created with defaults on first run):
   `OPENAI_API_KEY`, `GEMINI_API_KEY`, `MOONSHOT_API_KEY`), and `catalogue_summary`
   (see below)
 - `[updates]` — `enabled` (watch GitHub releases of catalogued projects) and
-  `mode` (`stage` = notify only for now; `auto` reserved for automatic installs)
+  `mode` (`stage` = download + verify, wait for your click; `silent` = install
+  automatically after each check)
 
 ## Catalogue summaries
 
@@ -217,9 +219,18 @@ asset or a hash in the release notes), and installs it:
 
 `codehound update REPO --rollback` puts the previous version back. AppImage, zip and
 tar archives install user-land; RPM and DEB payloads are unpacked without root (a
-system package install via pkexec is planned). Automatic installs are the next phase:
-`codehound updates --auto OWNER/REPO --mode auto|never|default` marks a single repo for
-(or out of) them; `default` follows the global `[updates] mode`.
+system package install via pkexec is planned).
+
+**Automatic updates (stage-then-confirm)**: after each check, every compatible update
+gets an auto policy applied — per-repo `codehound updates --auto OWNER/REPO --mode
+auto|never|default` wins; otherwise the global `[updates] mode` decides. `auto` repos
+(and everything, when mode is `silent`) install straight away; in `stage` mode the
+release is downloaded, checksum-verified and unpacked into a staging dir but **not**
+installed — the tray notification turns click-to-install, and
+`codehound updates --activate` (or plain `codehound update REPO`) installs what is
+staged. Staging is idempotent, and a staged release that a newer check supersedes is
+refused as stale rather than installed. `codehound updates --check --no-auto` skips
+the policy pass entirely.
 
 - Private repos and heavy polling need authentication: set a GitHub `token` in
   Settings → Accounts, or log in with the **gh** CLI — anonymous API access is limited
