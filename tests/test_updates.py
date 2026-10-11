@@ -749,5 +749,77 @@ class InstallTests(unittest.TestCase):
         self.assertTrue(sentinel.is_file())
 
 
+class CliInstallAllTests(unittest.TestCase):
+    """Regression: 'codehound updates --install-all' crashed with
+    AttributeError because the updates subparser never defined --exe."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        patcher = patch("codehound.db.DB_PATH", Path(self.temp.name) / "cat.db")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.conn = db.connect()
+        self.addCleanup(self.conn.close)
+        db.upsert_update(self.conn, {
+            "repo": "zacpr/appX", "path": "/r/appX", "name": "appX",
+            "current_tag": "v1.0.0", "latest_tag": "v1.1.0",
+            "published_at": None, "asset_name": "appX-v1.1.0.tar.gz",
+            "asset_url": "https://x/appX.tar.gz", "available": 1, "compatible": 1,
+            "reason": "", "last_checked": db.now()})
+        self.conn.commit()
+
+    def test_install_all_runs_without_crashing(self):
+        import io
+        from contextlib import redirect_stdout
+        from codehound.cli import main
+        calls = []
+
+        def fake_install(cfg, conn, repo, progress=None, exe_name=None):
+            calls.append((repo, exe_name))
+            return f"{repo}: installed"
+
+        for target, value in (
+            ("codehound.cli.ensure_config", lambda: None),
+            ("codehound.cli.load_config", lambda: _Cfg()),
+            ("codehound.updates.self_repo", lambda cfg: ""),
+            ("codehound.updates.install_update", fake_install),
+        ):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main(["updates", "--install-all"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [("zacpr/appX", None)])
+        self.assertIn("installed 1 update(s)", buf.getvalue())
+
+    def test_install_all_forwards_exe(self):
+        import io
+        from contextlib import redirect_stdout
+        from codehound.cli import main
+        calls = []
+
+        def fake_install(cfg, conn, repo, progress=None, exe_name=None):
+            calls.append((repo, exe_name))
+            return f"{repo}: installed"
+
+        for target, value in (
+            ("codehound.cli.ensure_config", lambda: None),
+            ("codehound.cli.load_config", lambda: _Cfg()),
+            ("codehound.updates.self_repo", lambda cfg: ""),
+            ("codehound.updates.install_update", fake_install),
+        ):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main(["updates", "--install-all", "--exe", "appX"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [("zacpr/appX", "appX")])
+
+
 if __name__ == "__main__":
     unittest.main()

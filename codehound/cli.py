@@ -558,6 +558,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="install every staged (downloaded + verified) update")
     p.add_argument("--install-all", action="store_true",
                    help="install every available compatible update (skips codeHOUND itself)")
+    p.add_argument("--exe", help="executable name inside the asset, when it can't be guessed")
     p.add_argument("--no-auto", action="store_true",
                    help="with --check, skip the auto-update policy pass")
     p.set_defaults(func=cmd_updates)
