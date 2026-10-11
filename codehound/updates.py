@@ -35,6 +35,7 @@ from urllib.request import Request, urlopen
 from . import db
 from .config import DATA_DIR
 from .providers.base import SyncError, http_json, run
+from .safepath import safe_rmtree
 
 API = "https://api.github.com"
 
@@ -233,6 +234,13 @@ def user_bin_dir() -> Path:
     return d
 
 
+def data_roots() -> tuple[Path, Path]:
+    """The only directories recursive deletes may touch: our downloads and
+    installs trees. Passed to safe_rmtree so a bad path can never reach
+    anything outside them."""
+    return (downloads_dir(), installs_dir())
+
+
 def _opt_path(value) -> Path | None:
     """A path stored in a DB column, or None when unset. Never Path("") —
     that is the current directory, and rmtree on it wipes whatever cwd is."""
@@ -338,7 +346,7 @@ def extract_archive(archive: Path, dest: Path) -> None:
         if not data:
             raise SyncError("deb has no data.tar member")
         _extract_tar(data, dest)
-        shutil.rmtree(work, ignore_errors=True)
+        safe_rmtree(work, data_roots(), "deb temp dir")
         return
     if ".tar" in name:
         _extract_tar(archive, dest)
@@ -492,7 +500,7 @@ def _fetch_verify_extract(cfg, row: sqlite3.Row, progress,
                  + ("" if keep_archive else " — staged unverified"))
 
     stage = _stage_dir_for(row)
-    shutil.rmtree(stage, ignore_errors=True)
+    safe_rmtree(stage, data_roots(), "staging dir")
     stage.mkdir(parents=True)
     extract_archive(archive, stage)
     if not keep_archive:
@@ -501,7 +509,7 @@ def _fetch_verify_extract(cfg, row: sqlite3.Row, progress,
     if exe is None and exe_name:
         exe = next((p for p in stage.rglob(exe_name) if p.is_file()), None)
     if exe is None:
-        shutil.rmtree(stage, ignore_errors=True)
+        safe_rmtree(stage, data_roots(), "staging dir")
         raise SyncError(f"{row['repo']}: could not find the app executable in "
                         f"{row['asset_name']} — pass --exe NAME")
     return stage, exe
@@ -574,7 +582,7 @@ def _drop_staged(conn: sqlite3.Connection, row: sqlite3.Row, progress) -> None:
     """Delete a repo's staging dir + row state (stale or superseded)."""
     stage = _staged_path(row)
     if stage is not None:
-        shutil.rmtree(stage, ignore_errors=True)
+        safe_rmtree(stage, data_roots(), "staged release")
         progress(f"dropped staged {row['repo']} {row['staged_tag']}")
     if row["staged_tag"] or row["staged_dir"]:
         db.clear_staged(conn, row["repo"])
@@ -631,7 +639,7 @@ def _install_managed(conn, row, stage, exe, progress) -> str:
     dest = installs_dir() / row["repo"] / row["latest_tag"]
     prev = installs_dir() / row["repo"] / row["installed_tag"] \
         if row["installed_tag"] else None
-    shutil.rmtree(dest, ignore_errors=True)
+    safe_rmtree(dest, data_roots(), "previous managed install")
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(stage), str(dest))
     rel = exe.relative_to(stage)
@@ -660,7 +668,7 @@ def _install_inplace(conn, row, stage, exe, existing: Path, progress) -> str:
         shutil.move(str(exe), str(existing))
     except OSError as e:
         raise SyncError(f"in-place replace failed: {e}") from e
-    shutil.rmtree(stage, ignore_errors=True)
+    safe_rmtree(stage, data_roots(), "staging dir")
     progress(f"previous binary kept at {backup.name}")
     return _finalize(conn, row, "inplace", existing.parent, existing, "", progress)
 
@@ -679,7 +687,7 @@ def _install_custom(conn, row, stage, exe, custom: Path, progress) -> str:
     shutil.move(str(exe), str(target))
     if not target.is_symlink():
         target.chmod(target.stat().st_mode | 0o755)
-    shutil.rmtree(stage, ignore_errors=True)
+    safe_rmtree(stage, data_roots(), "staging dir")
     return _finalize(conn, row, "custom", target.parent, target, "", progress)
 
 
