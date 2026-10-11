@@ -268,7 +268,10 @@ def _staged_path(row: sqlite3.Row) -> Path | None:
 
 
 def slug(repo: str) -> str:
-    return repo.split("/", 1)[1].lower().replace(" ", "-")
+    s = repo.split("/", 1)[1].lower().replace(" ", "-")
+    # defence in depth: a catalogue row is normally owner/repo from the URL
+    # parser, but a separator here would let the ~/.local/bin symlink escape
+    return s.replace("/", "-").replace("\\", "-")
 
 
 def download_asset(url: str, dest: Path, headers: dict | None = None) -> Path:
@@ -658,9 +661,30 @@ def _finalize(conn, row, mode, install_dir, install_exe, prev_dir, progress):
     return f"{row['repo']} {row['latest_tag']} installed ({mode}): {install_exe}"
 
 
+def _safe_component(value: str, what: str) -> str:
+    """A DB string used as a single path component — reject anything that
+    could escape its parent (absolute paths, '..', separators, empties)."""
+    v = (value or "").strip()
+    if not v or v in (".", "..") or "/" in v or "\\" in v or Path(v).is_absolute():
+        raise SyncError(f"unsafe {what} in the catalogue: {value!r}")
+    return v
+
+
+def _safe_repo_parts(repo: str) -> str:
+    """owner/repo validated component-by-component; returns it unchanged so
+    installs_dir()/repo stays a two-level path with no traversal."""
+    parts = (repo or "").strip().split("/")
+    if len(parts) != 2:
+        raise SyncError(f"unsafe repo in the catalogue: {repo!r}")
+    return "/".join(_safe_component(p, "repo") for p in parts)
+
+
 def _install_managed(conn, row, stage, exe, progress) -> str:
-    dest = installs_dir() / row["repo"] / row["latest_tag"]
-    prev = installs_dir() / row["repo"] / row["installed_tag"] \
+    repo_part = _safe_repo_parts(row["repo"])
+    tag_part = _safe_component(row["latest_tag"], "installed tag")
+    dest = installs_dir() / repo_part / tag_part
+    prev = installs_dir() / repo_part / _safe_component(row["installed_tag"],
+                                                        "previous tag") \
         if row["installed_tag"] else None
     safe_rmtree(dest, data_roots(), "previous managed install")
     dest.parent.mkdir(parents=True, exist_ok=True)

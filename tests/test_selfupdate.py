@@ -286,6 +286,36 @@ class SelfUpdateTests(_Base):
         self.assertEqual(calls, [])   # the self row is not fetched by the generic check
 
 
+class ManagedInstallHardeningTests(_Base):
+    """A tampered catalogue row must not steer managed installs outside the
+    installs tree (the wipe-bug class: DB strings used as path components)."""
+
+    def test_absolute_tag_refused(self):
+        from codehound.updates import _install_managed
+        self._seed("zacpr/appX", "appX.tar.gz")
+        row = db.get_update(self.conn, "zacpr/appX")
+        row = dict(row) | {"latest_tag": "/etc"}
+        stage = self.root / "stage"
+        stage.mkdir()
+        with self.assertRaises(SyncError) as ctx:
+            _install_managed(self.conn, row, stage, stage / "appX", self.noop)
+        self.assertIn("unsafe", str(ctx.exception))
+
+    def test_traversal_tag_refused(self):
+        from codehound.updates import _install_managed
+        self._seed("zacpr/appX", "appX.tar.gz")
+        row = dict(db.get_update(self.conn, "zacpr/appX")) | {"latest_tag": ".."}
+        stage = self.root / "stage"
+        stage.mkdir()
+        with self.assertRaises(SyncError):
+            _install_managed(self.conn, row, stage, stage / "appX", self.noop)
+
+    def test_slug_never_escapes_user_bin(self):
+        from codehound.updates import slug
+        self.assertNotIn("/", slug("owner/a/../b"))
+        self.assertNotIn("\\", slug("owner/a\\b"))
+
+
 class RelaunchTests(_Base):
     def test_schedule_relaunch_detaches_helper(self):
         spawned = []
