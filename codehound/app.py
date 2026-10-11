@@ -1029,6 +1029,7 @@ class Dashboard(QMainWindow):
             "Choose your search roots in Settings, then Scan Now."
             if not self.model.rowCount() else "Try a different search or catalogue view."
         )
+        self._set_update_button_state(self.model.updates_count())
 
     # ----- background CLI tasks (scan / sync) -----
     def _start_cli(self, attr: str, args: list[str], btn: QPushButton, busy: str, idle: str):
