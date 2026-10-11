@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS updates (
     prev_dir      TEXT,                 -- previous version dir, for rollback
     install_path  TEXT,                 -- user-chosen custom install location
     installed_tag TEXT,                 -- version currently installed by us
-    prev_tag      TEXT                  -- previous installed version (rollback target)
+    prev_tag      TEXT,                 -- previous installed version (rollback target)
+    staged_tag    TEXT,                 -- release downloaded + verified, awaiting confirm
+    staged_dir    TEXT                  -- unpacked staging dir for that release
 );
 """
 
@@ -76,6 +78,8 @@ _UPDATE_COLUMNS = {
     "install_path": "TEXT",
     "installed_tag": "TEXT",
     "prev_tag": "TEXT",
+    "staged_tag": "TEXT",
+    "staged_dir": "TEXT",
 }
 
 UPSERT_COLS = [
@@ -252,6 +256,24 @@ def set_install(conn: sqlite3.Connection, repo: str, *, mode: str, install_dir: 
 
 def set_update_install_path(conn: sqlite3.Connection, repo: str, path: str) -> None:
     conn.execute("UPDATE updates SET install_path = ? WHERE repo = ?", (path, repo))
+
+
+def staged_updates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Updates downloaded + verified, waiting to be activated."""
+    return conn.execute(
+        """SELECT * FROM updates WHERE staged_dir IS NOT NULL AND staged_dir != ''
+           ORDER BY published_at DESC, repo"""
+    ).fetchall()
+
+
+def set_staged(conn: sqlite3.Connection, repo: str, staged_tag: str,
+               staged_dir: str) -> None:
+    conn.execute("UPDATE updates SET staged_tag=?, staged_dir=? WHERE repo=?",
+                 (staged_tag, staged_dir, repo))
+
+
+def clear_staged(conn: sqlite3.Connection, repo: str) -> None:
+    conn.execute("UPDATE updates SET staged_tag='', staged_dir='' WHERE repo=?", (repo,))
 
 
 def kv_set(conn: sqlite3.Connection, key: str, value: str) -> None:

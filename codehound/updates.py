@@ -8,6 +8,12 @@ Phase 2: `install_update` downloads the matched asset, verifies its SHA-256
 installs it — replacing an existing managed/app binary in place when practical,
 otherwise into a managed dir (`installs/<repo>/<version>/`) with a symlink in
 `~/.local/bin`. The previous version is kept for `rollback_update`.
+Phase 3: auto-update policy. `apply_updates` runs after a check: with the
+default `[updates] mode = "stage"`, compatible updates are downloaded,
+verified and unpacked to a staging dir (`stage_update`) and the user confirms
+(`activate_staged` — via `codehound update REPO`, `updates --activate`, or
+clicking the tray message). `mode = "silent"` or a per-repo `auto=1` installs
+straight away; `auto=0` skips the repo entirely.
 """
 from __future__ import annotations
 
@@ -227,6 +233,23 @@ def user_bin_dir() -> Path:
     return d
 
 
+def _opt_path(value) -> Path | None:
+    """A path stored in a DB column, or None when unset. Never Path("") —
+    that is the current directory, and rmtree on it wipes whatever cwd is."""
+    value = (value or "").strip()
+    return Path(value) if value else None
+
+
+def _staged_path(row: sqlite3.Row) -> Path | None:
+    """The row's staging dir, only if it really is one inside downloads_dir()."""
+    stage = _opt_path(row["staged_dir"])
+    if stage is None or not stage.is_dir():
+        return None
+    if not stage.resolve().is_relative_to(downloads_dir().resolve()):
+        return None
+    return stage
+
+
 def slug(repo: str) -> str:
     return repo.split("/", 1)[1].lower().replace(" ", "-")
 
@@ -418,6 +441,13 @@ def install_update(cfg, conn: sqlite3.Connection, repo: str, progress=print,
     for rollback. Raises SyncError on any failure (nothing is moved until the
     download and checksum pass).
     """
+    row = _check_installable(conn, repo)
+    _drop_staged(conn, row, progress)   # a fresh download supersedes any staged copy
+    stage, exe = _fetch_verify_extract(cfg, row, progress, exe_name)
+    return _activate(conn, row, stage, exe, progress)
+
+
+def _check_installable(conn: sqlite3.Connection, repo: str) -> sqlite3.Row:
     row = db.get_update(conn, repo)
     if row is None:
         raise SyncError(f"{repo} is not on the watch list")
@@ -427,15 +457,26 @@ def install_update(cfg, conn: sqlite3.Connection, repo: str, progress=print,
     if not row["asset_name"].lower().endswith(_INSTALLABLE):
         raise SyncError(f"{repo}: cannot install {row['asset_name']} yet "
                         "(unsupported asset format)")
+    return row
 
-    # 1. download + verify before touching anything installed
-    fname = f"{repo.replace('/', '__')}__{row['asset_name']}"
+
+def _stage_dir_for(row: sqlite3.Row) -> Path:
+    fname = f"{row['repo'].replace('/', '__')}__{row['asset_name']}"
+    return downloads_dir() / f"stage-{fname}"
+
+
+def _fetch_verify_extract(cfg, row: sqlite3.Row, progress,
+                          exe_name: str | None = None,
+                          keep_archive: bool = True) -> tuple[Path, Path]:
+    """Download the matched asset, verify its checksum, unpack it, and locate
+    the executable. Nothing installed is touched at this stage."""
+    fname = f"{row['repo'].replace('/', '__')}__{row['asset_name']}"
     archive = downloads_dir() / fname
     progress(f"downloading {row['asset_name']}…")
     download_asset(row["asset_url"], archive)
     # fetch the release again by tag to look for a published SHA-256
     try:
-        release = _release_by_tag(cfg, repo, row["latest_tag"])
+        release = _release_by_tag(cfg, row["repo"], row["latest_tag"])
         expected = published_sha256(release, row["asset_name"]) if release else ""
     except SyncError:
         expected = ""
@@ -443,27 +484,32 @@ def install_update(cfg, conn: sqlite3.Connection, repo: str, progress=print,
     if expected:
         if actual != expected:
             archive.unlink(missing_ok=True)
-            raise SyncError(f"{repo}: SHA-256 mismatch — refusing to install "
+            raise SyncError(f"{row['repo']}: SHA-256 mismatch — refusing to install "
                             f"(expected {expected[:12]}…, got {actual[:12]}…)")
         progress("sha256 verified")
     else:
-        progress("no published checksum found — installing unverified")
+        progress("no published checksum found"
+                 + ("" if keep_archive else " — staged unverified"))
 
-    # 2. unpack to a staging dir
-    stage = downloads_dir() / f"stage-{fname}"
+    stage = _stage_dir_for(row)
     shutil.rmtree(stage, ignore_errors=True)
     stage.mkdir(parents=True)
     extract_archive(archive, stage)
-    exe = find_executable(stage, slug(repo))
+    if not keep_archive:
+        archive.unlink(missing_ok=True)
+    exe = find_executable(stage, slug(row["repo"]))
     if exe is None and exe_name:
-        cand = next((p for p in stage.rglob(exe_name) if p.is_file()), None)
-        exe = cand
+        exe = next((p for p in stage.rglob(exe_name) if p.is_file()), None)
     if exe is None:
         shutil.rmtree(stage, ignore_errors=True)
-        raise SyncError(f"{repo}: could not find the app executable in "
+        raise SyncError(f"{row['repo']}: could not find the app executable in "
                         f"{row['asset_name']} — pass --exe NAME")
+    return stage, exe
 
-    # 3. choose the install mode (ladder)
+
+def _activate(conn: sqlite3.Connection, row: sqlite3.Row, stage: Path,
+              exe: Path, progress) -> str:
+    """Move an unpacked + verified release into place (the install ladder)."""
     custom = (row["install_path"] or "").strip()
     if custom:
         return _install_custom(conn, row, stage, exe, Path(custom), progress)
@@ -471,6 +517,95 @@ def install_update(cfg, conn: sqlite3.Connection, repo: str, progress=print,
     if existing is not None:
         return _install_inplace(conn, row, stage, exe, existing, progress)
     return _install_managed(conn, row, stage, exe, progress)
+
+
+# ---------------------------------------------------------------- auto-updates
+
+def effective_mode(row: sqlite3.Row, global_mode: str) -> str:
+    """'silent' (install now), 'stage' (prepare, ask first) or 'skip'."""
+    if row["auto"] == 0:
+        return "skip"
+    if row["auto"] == 1 or global_mode == "silent":
+        return "silent"
+    return "stage"
+
+
+def stage_update(cfg, conn: sqlite3.Connection, repo: str, progress=print) -> str:
+    """Download + verify + unpack an update without installing it.
+
+    The unpacked release sits in the downloads dir and the row remembers it
+    (`staged_dir`); `activate_staged` moves it into place when the user says
+    go. Re-staging a newer release replaces the old staging dir.
+    """
+    row = _check_installable(conn, repo)
+    if row["staged_tag"] == row["latest_tag"] and _staged_path(row):
+        return f"{repo} {row['latest_tag']} already staged"
+    _drop_staged(conn, row, progress)
+    stage, _exe = _fetch_verify_extract(cfg, row, progress, keep_archive=False)
+    db.set_staged(conn, repo, row["latest_tag"], str(stage))
+    conn.commit()
+    progress(f"staged {row['repo']} {row['latest_tag']} — confirm with "
+             f"'codehound update {row['repo']}' or click the tray message")
+    return f"{row['repo']} {row['latest_tag']} staged (verified, not installed)"
+
+
+def activate_staged(conn: sqlite3.Connection, repo: str, progress=print) -> str:
+    """Install a release that was staged earlier."""
+    row = db.get_update(conn, repo)
+    if row is None:
+        raise SyncError(f"{repo} is not on the watch list")
+    stage = _staged_path(row)
+    if stage is None:
+        raise SyncError(f"{repo}: nothing staged to activate")
+    if row["available"] and row["staged_tag"] != row["latest_tag"]:
+        raise SyncError(f"{repo}: staged {row['staged_tag']} is stale "
+                        f"({row['latest_tag']} is newer) — run 'codehound update {repo}'")
+    exe = find_executable(stage, slug(repo))
+    if exe is None:
+        _drop_staged(conn, row, progress)
+        raise SyncError(f"{repo}: staged release has no executable — re-run the check")
+    summary = _activate(conn, row, stage, exe, progress)
+    db.clear_staged(conn, repo)
+    conn.commit()
+    return summary
+
+
+def _drop_staged(conn: sqlite3.Connection, row: sqlite3.Row, progress) -> None:
+    """Delete a repo's staging dir + row state (stale or superseded)."""
+    stage = _staged_path(row)
+    if stage is not None:
+        shutil.rmtree(stage, ignore_errors=True)
+        progress(f"dropped staged {row['repo']} {row['staged_tag']}")
+    if row["staged_tag"] or row["staged_dir"]:
+        db.clear_staged(conn, row["repo"])
+
+
+def apply_updates(cfg, conn: sqlite3.Connection, progress=print) -> tuple[list[str], list[str], list[str]]:
+    """Apply the auto-update policy to every compatible update.
+
+    Per repo: `auto=0` skips, `auto=1` installs silently, otherwise the global
+    `[updates] mode` decides — "stage" downloads + verifies and waits for a
+    click, "silent" installs straight away. Returns (installed, staged, errors).
+    """
+    installed: list[str] = []
+    staged: list[str] = []
+    errors: list[str] = []
+    for row in db.available_updates(conn):
+        if not row["compatible"] or not row["asset_name"].lower().endswith(_INSTALLABLE):
+            continue
+        mode = effective_mode(row, cfg.updates_mode)
+        if mode == "skip":
+            progress(f"{row['repo']}: auto-update is off for this repo")
+            continue
+        try:
+            if mode == "silent":
+                installed.append(install_update(cfg, conn, row["repo"], progress))
+            else:
+                staged.append(stage_update(cfg, conn, row["repo"], progress))
+        except SyncError as e:
+            errors.append(f"{row['repo']}: {e}")
+            progress(f"{row['repo']}: {e}")
+    return installed, staged, errors
 
 
 def _release_by_tag(cfg, repo: str, tag: str) -> dict | None:
@@ -486,6 +621,7 @@ def _finalize(conn, row, mode, install_dir, install_exe, prev_dir, progress):
                    install_exe=str(install_exe), prev_dir=str(prev_dir or ""),
                    installed_tag=row["latest_tag"], prev_tag=row["installed_tag"] or "",
                    )
+    db.clear_staged(conn, row["repo"])
     conn.commit()
     progress(f"installed {row['repo']} {row['latest_tag']} ({mode}) → {install_exe}")
     return f"{row['repo']} {row['latest_tag']} installed ({mode}): {install_exe}"
@@ -554,8 +690,8 @@ def rollback_update(conn: sqlite3.Connection, repo: str, progress=print) -> str:
         raise SyncError(f"{repo} is not on the watch list")
     mode = row["install_mode"] or ""
     if mode == "managed":
-        prev = Path(row["prev_dir"] or "")
-        if not prev.is_dir():
+        prev = _opt_path(row["prev_dir"])
+        if prev is None or not prev.is_dir():
             raise SyncError(f"{repo}: no previous managed install to roll back to")
         link = Path(row["install_exe"] or (user_bin_dir() / slug(repo)))
         if link.is_symlink() or link.exists():
@@ -572,7 +708,9 @@ def rollback_update(conn: sqlite3.Connection, repo: str, progress=print) -> str:
         progress(f"rolled back {repo} to {row['prev_tag']}")
         return f"{repo} rolled back to {row['prev_tag']}: {link}"
     if mode in ("inplace", "custom"):
-        target = Path(row["install_exe"] or "")
+        target = _opt_path(row["install_exe"])
+        if target is None:
+            raise SyncError(f"{repo}: no backup binary to roll back to")
         backup = target.with_name(target.name + ".codehound-bak")
         if not target.is_file() or not backup.is_file():
             raise SyncError(f"{repo}: no backup binary to roll back to")

@@ -490,6 +490,65 @@ class InstallTests(unittest.TestCase):
         with self.assertRaises(SyncError):
             install_update(_Cfg(), self.conn, "zacpr/appX", progress=self.noop)
 
+    def _cwd_sentinel(self) -> Path:
+        """chdir into a dir holding a sentinel file — an empty staged_dir once
+        became Path("") == cwd and rmtree'd the whole checkout."""
+        cwd = self.root / "cwd"
+        cwd.mkdir()
+        sentinel = cwd / "SENTINEL"
+        sentinel.write_text("keep me")
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(cwd)
+        return sentinel
+
+    def test_install_never_staged_leaves_cwd_alone(self):
+        sentinel = self._cwd_sentinel()
+        self.assertIsNone(self._row()["staged_dir"])
+        install_update(_Cfg(), self.conn, "zacpr/appX", progress=self.noop)
+        self.assertTrue(sentinel.is_file())
+
+    def test_stage_with_empty_staged_dir_leaves_cwd_alone(self):
+        from codehound.updates import stage_update
+        sentinel = self._cwd_sentinel()
+        self.conn.execute("UPDATE updates SET staged_tag='v1.0.0', staged_dir='' "
+                          "WHERE repo='zacpr/appX'")
+        self.conn.commit()
+        stage_update(_Cfg(), self.conn, "zacpr/appX", progress=self.noop)
+        self.assertTrue(sentinel.is_file())
+
+    def test_activate_with_empty_staged_dir_refuses(self):
+        from codehound.providers.base import SyncError
+        from codehound.updates import activate_staged
+        sentinel = self._cwd_sentinel()
+        self.conn.execute("UPDATE updates SET staged_tag='v1.1.0', staged_dir='' "
+                          "WHERE repo='zacpr/appX'")
+        self.conn.commit()
+        with self.assertRaises(SyncError):
+            activate_staged(self.conn, "zacpr/appX", progress=self.noop)
+        self.assertTrue(sentinel.is_file())
+
+    def test_staged_dir_outside_downloads_is_not_deleted(self):
+        outside = self.root / "not-a-stage"
+        outside.mkdir()
+        (outside / "file").write_text("x")
+        self.conn.execute("UPDATE updates SET staged_tag='v1.0.0', staged_dir=? "
+                          "WHERE repo='zacpr/appX'", (str(outside),))
+        self.conn.commit()
+        install_update(_Cfg(), self.conn, "zacpr/appX", progress=self.noop)
+        self.assertTrue((outside / "file").is_file())
+        self.assertFalse(self._row()["staged_dir"])
+
+    def test_rollback_with_empty_paths_refuses(self):
+        from codehound.providers.base import SyncError
+        sentinel = self._cwd_sentinel()
+        for mode, col in (("managed", "prev_dir"), ("inplace", "install_exe")):
+            self.conn.execute(f"UPDATE updates SET install_mode=?, {col}='' "
+                              "WHERE repo='zacpr/appX'", (mode,))
+            self.conn.commit()
+            with self.assertRaises(SyncError):
+                rollback_update(self.conn, "zacpr/appX", progress=self.noop)
+        self.assertTrue(sentinel.is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

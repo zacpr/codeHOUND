@@ -289,6 +289,19 @@ def cmd_updates(args) -> int:
                      "default": "follow the global mode"}[args.mode]
             _say(f"{repo}: {state}")
             return 0
+        if args.activate:
+            staged = db.staged_updates(conn)
+            if not staged:
+                _say("nothing staged — run 'codehound updates --check' first")
+                return 0
+            failed = 0
+            for row in staged:
+                try:
+                    _say(updates.activate_staged(conn, row["repo"], progress=_say))
+                except SyncError as e:
+                    _say(f"activate: {e}")
+                    failed += 1
+            return 1 if failed else 0
         if args.check:
             _say(f"checking GitHub releases for {len(updates.watch_targets(conn))} watched repos…")
             try:
@@ -296,6 +309,14 @@ def cmd_updates(args) -> int:
             except SyncError as e:
                 _say(f"updates: {e}")
                 return 1
+            if available and not args.no_auto:
+                installed, newly_staged, _errs = updates.apply_updates(
+                    cfg, conn, progress=_say)
+                if installed:
+                    _say(f"auto-installed {len(installed)} update(s)")
+                if newly_staged:
+                    _say(f"{len(newly_staged)} update(s) staged — confirm with "
+                         "'codehound update REPO' or 'codehound updates --activate'")
         else:
             available = db.available_updates(conn)
         if not available:
@@ -310,6 +331,8 @@ def cmd_updates(args) -> int:
                 _say(f"      asset: {row['asset_name']}")
             if row["installed_tag"]:
                 _say(f"      installed by codeHOUND: {row['installed_tag']} ({row['install_mode']})")
+            if (row["staged_dir"] or "") and Path(row["staged_dir"]).is_dir():
+                _say(f"      staged: {row['staged_tag']} — 'codehound update {row['repo']}' installs it")
         return 0
     finally:
         conn.close()
@@ -369,8 +392,15 @@ def cmd_update(args) -> int:
                  + (f"set to {args.set_path}" if args.set_path else "cleared"))
             return 0
         try:
-            _say(updates.install_update(cfg=load_config(), conn=conn, repo=repo,
-                                        progress=_say, exe_name=args.exe))
+            row = db.get_update(conn, repo)
+            staged = (row["staged_dir"] or "") if row else ""
+            if staged and not args.exe and Path(staged).is_dir() \
+                    and row["staged_tag"] == row["latest_tag"]:
+                # already downloaded + verified — just move it into place
+                _say(updates.activate_staged(conn, repo, progress=_say))
+            else:
+                _say(updates.install_update(cfg=load_config(), conn=conn, repo=repo,
+                                            progress=_say, exe_name=args.exe))
         except SyncError as e:
             _say(f"update: {e}")
             return 1
@@ -453,6 +483,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--auto", metavar="REPO", help="set auto-install mode for owner/repo")
     p.add_argument("--mode", choices=["auto", "never", "default"], default="default",
                    help="mode for --auto (default: follow global)")
+    p.add_argument("--activate", action="store_true",
+                   help="install every staged (downloaded + verified) update")
+    p.add_argument("--no-auto", action="store_true",
+                   help="with --check, skip the auto-update policy pass")
     p.set_defaults(func=cmd_updates)
 
     p = sub.add_parser("update", help="install (or roll back) a watched repo's latest release")

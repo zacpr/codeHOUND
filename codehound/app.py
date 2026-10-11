@@ -285,6 +285,7 @@ class Dashboard(QMainWindow):
         self._digest_proc: QProcess | None = None
         self._new_proc: QProcess | None = None
         self._updates_proc: QProcess | None = None
+        self._staged_count = 0
         self.tray = None   # set by run_app() once the tray icon exists
         self._view = "all"
         self._pinned_paths = self._load_pins()
@@ -1002,15 +1003,20 @@ class Dashboard(QMainWindow):
             self._notify_updates()
 
     def _notify_updates(self):
-        """Bubble a tray message when an update check found something new."""
+        """Bubble a tray message when an update check found something new.
+
+        Updates the auto policy staged (downloaded + verified) get a
+        click-to-install message; `activate_staged` installs them."""
         try:
             conn = db.connect()
             try:
                 rows = db.available_updates(conn)
+                staged = db.staged_updates(conn)
             finally:
                 conn.close()
         except sqlite3.Error:
             return
+        self._staged_count = sum(1 for r in staged if (r["staged_dir"] or ""))
         if not rows:
             self.statusBar().showMessage("updates: everything is current")
             return
@@ -1019,10 +1025,20 @@ class Dashboard(QMainWindow):
                 f"(you have {first['current_tag'] or 'unknown'})")
         if len(rows) > 1:
             text += f" · +{len(rows) - 1} more"
+        if self._staged_count:
+            text += " — click to install"
         self.statusBar().showMessage(f"{len(rows)} update(s) available — see Activity")
         if self.tray is not None:
             self.tray.showMessage("codeHOUND — updates", text,
                                   QSystemTrayIcon.MessageIcon.Information, 8000)
+
+    def activate_staged(self):
+        """Tray message click: install the updates staging already verified."""
+        if not self._staged_count or self._updates_proc is not None:
+            return
+        self._staged_count = 0
+        self._start_cli("_updates_proc", ["updates", "--activate"],
+                        self.updates_btn, "Installing…", "Check Updates")
 
     # ----- actions -----
     def open_settings(self):
@@ -1217,6 +1233,8 @@ def run_app() -> int:
                 win.activateWindow()
 
     tray.activated.connect(on_activated)
+    # clicking an update notification activates (installs) the staged updates
+    tray.messageClicked.connect(win.activate_staged)
     tray.show()
     win.tray = tray
 
