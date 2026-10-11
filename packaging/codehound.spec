@@ -1,5 +1,5 @@
 Name:           codehound
-Version:        0.3.0
+Version:        0.4.0
 Release:        1%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
@@ -79,6 +79,13 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Sun Oct 11 2026 zacpr <zac@ashurtech.net> - 0.4.0-1
+- codehound detect: finds installed editors, AI agent CLIs (Claude Code,
+  Codex, Gemini, Aider, Copilot, Cody, Kimi) wrapped in a terminal, and
+  running OpenAI-compatible local model servers (LM Studio, OpenWebUI, ...)
+- Settings: "Detect installed tools..." in Launchers and
+  "Detect local AI services..." in the AI tab, both via a tick-list dialog
+
 * Sun Oct 11 2026 zacpr <zac@ashurtech.net> - 0.3.0-1
 - New Project: one button to create a brand-new project (git init, optional
   AI scaffold), clone an existing repo (URL, local path, or the catalogue),

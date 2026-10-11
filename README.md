@@ -75,6 +75,7 @@ codehound new NAME          # create a brand-new git project in ~/repos
 codehound new NAME -d "…" --scaffold  # …with AI-written starter files (falls back to README)
 codehound clone SRC         # clone a git URL or local repo into ~/repos (--name to rename)
 codehound worktree PATH BR  # add BR as a sibling worktree of PATH (new or existing branch)
+codehound detect            # list installed editors, AI agent CLIs and local AI services
 codehound open NAME         # fuzzy-find a project and open it in the first launcher
 codehound janitor           # dry-run: show clones whose remote work is done
 codehound janitor --force   # actually remove them
@@ -132,7 +133,10 @@ Badges on the Name column: `✱` uncommitted changes · `⧉` same remote cloned
 Everything is editable in the app: **Settings** button on the dashboard (or **Settings…**
 in the tray menu) — tabs for Scan (roots, excluded dirs/paths, depth, mount-point crossing),
 Ollama, Launchers (add/edit/remove/reorder; the first entry is the double-click default)
-and Adopt destination. Changes are saved to `~/.config/codehound/config.toml`, which you
+and Adopt destination. The Launchers tab has **Detect installed tools…** to find
+editors, file managers and AI agent CLIs on your PATH, and the AI tab has
+**Detect local AI services…** to probe for running OpenAI-compatible servers.
+Changes are saved to `~/.config/codehound/config.toml`, which you
 can also edit by hand (created with defaults on first run):
 
 - `[scan] roots` — directories to hunt; add/remove as needed
