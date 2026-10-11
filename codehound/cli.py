@@ -173,6 +173,35 @@ def cmd_adopt(args) -> int:
     return 0
 
 
+def cmd_detect(args) -> int:
+    from . import discovery
+
+    cfg = load_config()
+    editors = discovery.detect_editors(cfg.launchers)
+    agents = discovery.detect_agent_clis(cfg.launchers)
+    runners = discovery.detect_model_runners()
+
+    _say("Editors / tools:")
+    for d in editors:
+        _say(f"  {d.name} — {d.command}")
+    if not editors:
+        _say("  none found")
+
+    _say("AI agent CLIs:")
+    for d in agents:
+        _say(f"  {d.name} — {d.command}")
+    if not agents:
+        _say("  none found (or no terminal emulator detected to launch them in)")
+
+    _say("Local AI services:")
+    for r in runners:
+        note = f" (model: {r.model})" if r.model else ""
+        _say(f"  {r.label} — {r.base_url}{note}")
+    if not runners:
+        _say("  none found")
+    return 0
+
+
 def cmd_install_timer(args) -> int:
     from .install import install_timer
     return install_timer(every=args.every)
@@ -222,6 +251,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("path", help="project directory to adopt")
     p.add_argument("--name", help="destination name (default: auto-unique)")
     p.set_defaults(func=cmd_adopt)
+
+    p = sub.add_parser("detect", help="detect installed editors, AI agent CLIs, and local AI services")
+    p.set_defaults(func=cmd_detect)
 
     p = sub.add_parser("install-timer", help="install + enable the systemd user scan timer")
     p.add_argument("--every", default="6h", help="scan interval (systemd time span, default 6h)")
