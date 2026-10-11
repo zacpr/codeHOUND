@@ -51,7 +51,7 @@ codehound app
 
 # Optional desktop and background integration
 codehound install-autostart   # app menu + start tray app at login
-codehound install-timer       # systemd user timer: scan every 6h
+codehound install-timer       # systemd user timer: sync, scan + update checks every 6h
 ```
 
 On first launch, open **Settings → Scan** to choose your search roots, then hit
@@ -79,6 +79,8 @@ codehound detect            # list installed editors, AI agent CLIs and local AI
 codehound open NAME         # fuzzy-find a project and open it in the first launcher
 codehound janitor           # dry-run: show clones whose remote work is done
 codehound janitor --force   # actually remove them
+codehound updates           # list known updates for watched GitHub repos
+codehound updates --check   # refresh from the GitHub API first, then list
 ```
 
 ## The dashboard
@@ -158,6 +160,8 @@ can also edit by hand (created with defaults on first run):
   `model` / `base_url` (blank = provider default), `api_key` (blank = env var:
   `OPENAI_API_KEY`, `GEMINI_API_KEY`, `MOONSHOT_API_KEY`), and `catalogue_summary`
   (see below)
+- `[updates]` — `enabled` (watch GitHub releases of catalogued projects) and
+  `mode` (`stage` = notify only for now; `auto` reserved for automatic installs)
 
 ## Catalogue summaries
 
@@ -188,6 +192,24 @@ finished — **GitHub**: archived repos; **Azure DevOps**: disabled repos and br
 PRs are completed or abandoned. A clone is only listed (or removed, with `--force`) when
 it has no uncommitted changes and no unpushed commits. Settings → Janitor has the toggle,
 an exclude list (repo names or full paths), and a dry-run button.
+
+## Update manager
+
+Every catalogued project with a GitHub remote is a **watch target**: `codehound updates
+--check` (or the dashboard's **Check Updates** button, or the systemd timer) asks the
+GitHub API for each repo's newest published release and compares it with the local
+checkout's tag. When a newer release exists, codeHOUND picks the release asset that
+matches your OS and CPU architecture (AppImage/RPM/DEB/archives ranked; source archives
+and foreign-arch builds skipped) and tells you — tray notification plus
+`codehound updates` — with the asset it would install. Nothing is downloaded or
+installed yet; automatic installs are planned for a later release.
+
+- `codehound updates` lists what is known; `--check` refreshes from the API first.
+- `codehound updates --auto OWNER/REPO --mode auto|never|default` marks a single repo
+  for (or out of) future automatic installs; `default` follows the global `[updates] mode`.
+- Private repos and heavy polling need authentication: set a GitHub `token` in
+  Settings → Accounts, or log in with the **gh** CLI — anonymous API access is limited
+  to 60 requests/hour and private repos appear as 404s.
 
 ## How detection works
 

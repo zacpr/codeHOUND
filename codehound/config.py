@@ -81,6 +81,15 @@ dest = "{home}/repos"   # synced account repos land in <dest>/<host>/<owner>/<re
 enabled = true
 exclude = []            # repo names or full paths the janitor must never touch
 
+# Watches GitHub releases for catalogued projects with a GitHub remote and
+# notifies when a newer compatible release exists (`codehound updates`).
+# mode = "stage"  download + verify automatically, activate on confirmation
+# mode = "silent" fully automatic install for opted-in repos, notify after
+# Per-repo override: codehound updates --auto <repo> (auto / never / default).
+[updates]
+enabled = true
+mode = "stage"
+
 # Accounts mirrored by `codehound sync` (also editable in the app's Settings → Accounts).
 # Tokens are optional: GitHub falls back to the gh CLI login, Azure DevOps to az.
 # [[accounts.github]]
@@ -121,6 +130,8 @@ class Config:
     ai_catalogue_summary: bool = False
     janitor_enabled: bool = True
     janitor_exclude: list[str] = field(default_factory=list)
+    updates_enabled: bool = True
+    updates_mode: str = "stage"   # "stage" = confirm before activating, "silent" = auto-install
 
 
 def ensure_config() -> Path:
@@ -195,6 +206,11 @@ dest = {_toml_str(cfg.clone_dest)}   # synced account repos land in <dest>/<host
 [janitor]
 enabled = {str(cfg.janitor_enabled).lower()}
 exclude = {_toml_list(cfg.janitor_exclude)}            # repo names or full paths the janitor must never touch
+
+# Watches GitHub releases for catalogued projects with a GitHub remote.
+[updates]
+enabled = {str(cfg.updates_enabled).lower()}
+mode = {_toml_str(cfg.updates_mode)}   # "stage" = confirm before activating, "silent" = auto-install
 {accounts}
 """
     CONFIG_PATH.write_text(text)
@@ -211,6 +227,7 @@ def load_config() -> Config:
     clone = raw.get("clone", {})
     ai = raw.get("ai", {})
     janitor = raw.get("janitor", {})
+    updates = raw.get("updates", {})
     raw_accounts = raw.get("accounts", {})
     accounts = {
         key: provider.load_accounts(raw_accounts.get(key, []))
@@ -239,4 +256,6 @@ def load_config() -> Config:
         ai_catalogue_summary=ai.get("catalogue_summary", False),
         janitor_enabled=janitor.get("enabled", True),
         janitor_exclude=list(janitor.get("exclude", [])),
+        updates_enabled=updates.get("enabled", True),
+        updates_mode=updates.get("mode", "stage"),
     )

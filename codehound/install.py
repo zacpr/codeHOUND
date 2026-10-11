@@ -18,6 +18,7 @@ Description=codeHOUND project scan
 Type=oneshot
 ExecStart=-{exe} sync
 ExecStart={exe} scan
+ExecStart=-{exe} updates --check
 Nice=19
 IOSchedulingClass=idle
 """

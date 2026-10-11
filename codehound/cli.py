@@ -265,6 +265,53 @@ def cmd_detect(args) -> int:
     return 0
 
 
+def cmd_updates(args) -> int:
+    from . import db, updates
+    from .providers.base import SyncError
+
+    cfg = load_config()
+    if not cfg.updates_enabled and not args.force:
+        _say("updates watching is disabled — enable it in config.toml [updates] "
+             "(or pass --force)")
+        return 0
+    conn = db.connect()
+    try:
+        if args.auto:
+            repo = args.auto.lower()
+            if db.get_update(conn, repo) is None:
+                _say(f"{repo} is not on the watch list — it needs a catalogued "
+                     "clone with a GitHub remote")
+                return 1
+            db.set_update_auto(conn, repo, args.mode)
+            conn.commit()
+            state = {"auto": "auto-install", "never": "never auto-install",
+                     "default": "follow the global mode"}[args.mode]
+            _say(f"{repo}: {state}")
+            return 0
+        if args.check:
+            _say(f"checking GitHub releases for {len(updates.watch_targets(conn))} watched repos…")
+            try:
+                available = updates.check_updates(cfg, conn, progress=_say)
+            except SyncError as e:
+                _say(f"updates: {e}")
+                return 1
+        else:
+            available = db.available_updates(conn)
+        if not available:
+            _say("no updates available" + ("" if args.check else " (run with --check to refresh)"))
+            return 0
+        _say(f"{len(available)} update(s) available:")
+        for row in available:
+            mark = "✓ installable here" if row["compatible"] else f"✗ {row['reason'] or 'no compatible asset'}"
+            have = row["current_tag"] or "unknown"
+            _say(f"  {row['repo']}: {have} → {row['latest_tag']}  [{mark}]")
+            if row["asset_name"]:
+                _say(f"      asset: {row['asset_name']}")
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_install_timer(args) -> int:
     from .install import install_timer
     return install_timer(every=args.every)
@@ -337,6 +384,14 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("detect", help="detect installed editors, AI agent CLIs, and local AI services")
     p.set_defaults(func=cmd_detect)
+
+    p = sub.add_parser("updates", help="check GitHub releases of watched repos for updates")
+    p.add_argument("--check", action="store_true", help="refresh from GitHub first")
+    p.add_argument("--force", action="store_true", help="run even if watching is disabled")
+    p.add_argument("--auto", metavar="REPO", help="set auto-install mode for owner/repo")
+    p.add_argument("--mode", choices=["auto", "never", "default"], default="default",
+                   help="mode for --auto (default: follow global)")
+    p.set_defaults(func=cmd_updates)
 
     p = sub.add_parser("install-timer", help="install + enable the systemd user scan timer")
     p.add_argument("--every", default="6h", help="scan interval (systemd time span, default 6h)")

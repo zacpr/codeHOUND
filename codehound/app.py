@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -283,6 +284,8 @@ class Dashboard(QMainWindow):
         self._sync_proc: QProcess | None = None
         self._digest_proc: QProcess | None = None
         self._new_proc: QProcess | None = None
+        self._updates_proc: QProcess | None = None
+        self.tray = None   # set by run_app() once the tray icon exists
         self._view = "all"
         self._pinned_paths = self._load_pins()
         self._featured: list[dict] = []
@@ -452,6 +455,7 @@ class Dashboard(QMainWindow):
         self.search.textChanged.connect(self._filter_changed)
         self.scan_btn.clicked.connect(self.start_scan)
         self.sync_btn.clicked.connect(self.start_sync)
+        self.updates_btn.clicked.connect(self.start_updates)
         self.ask_btn.clicked.connect(self.ask_ai)
         self.new_btn.clicked.connect(self.new_project)
         reload_btn.clicked.connect(self.reload)
@@ -509,6 +513,9 @@ class Dashboard(QMainWindow):
         layout.addStretch()
         self.sync_btn = QPushButton("Sync Accounts")
         layout.addWidget(self.sync_btn)
+        self.updates_btn = QPushButton("Check Updates")
+        self.updates_btn.setToolTip("Look for newer GitHub releases of watched projects")
+        layout.addWidget(self.updates_btn)
         self.activity_btn = QPushButton("Activity")
         layout.addWidget(self.activity_btn)
         settings = QPushButton("Settings")
@@ -955,6 +962,10 @@ class Dashboard(QMainWindow):
     def start_sync(self):
         self._start_cli("_sync_proc", ["sync"], self.sync_btn, "Syncing…", "Sync Accounts")
 
+    def start_updates(self):
+        self._start_cli("_updates_proc", ["updates", "--check"],
+                        self.updates_btn, "Checking…", "Check Updates")
+
     def new_project(self, default_tab: int = 0):
         dlg = NewProjectDialog(self.cfg, self, default_tab, self._selected_path())
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -987,6 +998,31 @@ class Dashboard(QMainWindow):
         if code != 0:
             self.activity_dock.show()
             self.statusBar().showMessage(f"{what} exited with code {code} — see Activity")
+        elif what == "updates":
+            self._notify_updates()
+
+    def _notify_updates(self):
+        """Bubble a tray message when an update check found something new."""
+        try:
+            conn = db.connect()
+            try:
+                rows = db.available_updates(conn)
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return
+        if not rows:
+            self.statusBar().showMessage("updates: everything is current")
+            return
+        first = rows[0]
+        text = (f"{first['name'] or first['repo']} {first['latest_tag']} is available "
+                f"(you have {first['current_tag'] or 'unknown'})")
+        if len(rows) > 1:
+            text += f" · +{len(rows) - 1} more"
+        self.statusBar().showMessage(f"{len(rows)} update(s) available — see Activity")
+        if self.tray is not None:
+            self.tray.showMessage("codeHOUND — updates", text,
+                                  QSystemTrayIcon.MessageIcon.Information, 8000)
 
     # ----- actions -----
     def open_settings(self):
@@ -1182,6 +1218,7 @@ def run_app() -> int:
 
     tray.activated.connect(on_activated)
     tray.show()
+    win.tray = tray
 
     win.show()
     return app.exec()

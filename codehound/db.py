@@ -40,6 +40,23 @@ CREATE TABLE IF NOT EXISTS kv (
     key             TEXT PRIMARY KEY,
     value           TEXT
 );
+CREATE TABLE IF NOT EXISTS updates (
+    repo          TEXT PRIMARY KEY,     -- owner/repo on GitHub
+    path          TEXT,                 -- local clone path
+    name          TEXT,                 -- catalogue display name
+    current_tag   TEXT,                 -- tag checked out locally ('' = unknown)
+    latest_tag    TEXT,
+    published_at  TEXT,
+    asset_name    TEXT,                 -- best asset for this OS/arch ('' = none)
+    asset_url     TEXT,
+    available     INTEGER DEFAULT 0,    -- newer release exists
+    compatible    INTEGER DEFAULT 0,    -- and an installable asset matched
+    reason        TEXT,                 -- why not compatible / no update
+    auto          INTEGER,              -- NULL = follow default, 1 = auto-install, 0 = never
+    seen          INTEGER DEFAULT 1,
+    last_checked  TEXT,
+    last_install  TEXT
+);
 """
 
 UPSERT_COLS = [
@@ -143,6 +160,55 @@ def last_scan(conn: sqlite3.Connection) -> sqlite3.Row | None:
 def kv_get(conn: sqlite3.Connection, key: str) -> str | None:
     row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else None
+
+
+# ----- updates (release watch) -----
+
+def upsert_update(conn: sqlite3.Connection, u: dict) -> None:
+    """Record the latest check result for one watched repo, keeping user flags."""
+    conn.execute(
+        """INSERT INTO updates (repo, path, name, current_tag, latest_tag, published_at,
+                                asset_name, asset_url, available, compatible, reason,
+                                seen, last_checked)
+           VALUES (:repo, :path, :name, :current_tag, :latest_tag, :published_at,
+                   :asset_name, :asset_url, :available, :compatible, :reason,
+                   1, :last_checked)
+           ON CONFLICT(repo) DO UPDATE SET
+               path=excluded.path, name=excluded.name, current_tag=excluded.current_tag,
+               latest_tag=excluded.latest_tag, published_at=excluded.published_at,
+               asset_name=excluded.asset_name, asset_url=excluded.asset_url,
+               available=excluded.available, compatible=excluded.compatible,
+               reason=excluded.reason, last_checked=excluded.last_checked""",
+        u,
+    )
+
+
+def get_update(conn: sqlite3.Connection, repo: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM updates WHERE repo = ?", (repo,)).fetchone()
+
+
+def available_updates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        """SELECT * FROM updates WHERE available = 1
+           ORDER BY published_at DESC, repo"""
+    ).fetchall()
+
+
+def set_update_auto(conn: sqlite3.Connection, repo: str, mode: str | None) -> None:
+    """mode: 'auto' -> 1, 'never' -> 0, 'default'/None -> NULL (follow global)."""
+    value = {"auto": 1, "never": 0}.get(mode)
+    conn.execute("UPDATE updates SET auto = ? WHERE repo = ?", (value, repo))
+
+
+def mark_updates_seen(conn: sqlite3.Connection) -> None:
+    conn.execute("UPDATE updates SET seen = 1 WHERE available = 1")
+
+
+def note_update_install(conn: sqlite3.Connection, repo: str) -> None:
+    conn.execute(
+        "UPDATE updates SET last_install = ?, available = 0, seen = 1 WHERE repo = ?",
+        (now(), repo),
+    )
 
 
 def kv_set(conn: sqlite3.Connection, key: str, value: str) -> None:
