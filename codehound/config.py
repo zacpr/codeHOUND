@@ -165,7 +165,7 @@ def _toml_list(values: list[str]) -> str:
 def save_config(cfg: Config) -> Path:
     """Write the config back to CONFIG_PATH, keeping the explanatory comments."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    launchers = "\n".join(f"{name} = {_toml_str(cmd)}" for name, cmd in cfg.launchers.items())
+    launchers = "\n".join(f"{_toml_str(name)} = {_toml_str(cmd)}" for name, cmd in cfg.launchers.items())
     blocks = []
     for key, provider in PROVIDERS.items():
         for account in cfg.accounts.get(key, []):
