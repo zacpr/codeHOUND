@@ -1,5 +1,5 @@
 Name:           codehound
-Version:        0.5.1.3
+Version:        0.5.1.4
 Release:        1%{?dist}
 Summary:        Repo hunter and launcher dashboard
 
@@ -79,6 +79,12 @@ chmod 755 %{buildroot}%{_bindir}/codehound
 /usr/bin/gtk-update-icon-cache %{_datadir}/icons/hicolor &> /dev/null || :
 
 %changelog
+* Sat Oct 31 2026 zacpr <zac@ashurtech.net> - 0.5.1.4-1
+- Config: launcher names are now quoted when the config is written. The
+  writer emitted names as bare TOML keys, so a launcher whose name
+  contains a space (e.g. 'Claude Code') produced an invalid config.toml
+  and the app crashed on the next startup with TOMLDecodeError.
+
 * Mon Oct 12 2026 zacpr <zac@ashurtech.net> - 0.5.1.3-1
 - Updates: fixed 'codehound updates --install-all' crashing with
   AttributeError ('Namespace' has no attribute 'exe') — --exe was only
